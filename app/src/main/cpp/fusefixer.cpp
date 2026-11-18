@@ -614,14 +614,65 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     return on_library_loaded;
 }
 
+static jint jstringToStandardUtf8(JNIEnv *env, jstring value, std::string *output) {
+    if (!env || !value || !output) return EINVAL;
+    const jsize length = env->GetStringLength(value);
+    const jchar *chars = env->GetStringChars(value, nullptr);
+    if (!chars) return ENOMEM;
+
+    struct Utf16CharsGuard {
+        JNIEnv *env;
+        jstring value;
+        const jchar *chars;
+        ~Utf16CharsGuard() {
+            if (chars) env->ReleaseStringChars(value, chars);
+        }
+    } guard{env, value, chars};
+
+    output->clear();
+    output->reserve(static_cast<size_t>(length) * 3);
+    for (jsize i = 0; i < length; ++i) {
+        uint32_t code_point = chars[i];
+        if (code_point >= 0xD800 && code_point <= 0xDBFF) {
+            if (i + 1 >= length) return EILSEQ;
+            const uint32_t low = chars[++i];
+            if (low < 0xDC00 || low > 0xDFFF) return EILSEQ;
+            code_point = 0x10000 + ((code_point - 0xD800) << 10) +
+                         (low - 0xDC00);
+        } else if (code_point >= 0xDC00 && code_point <= 0xDFFF) {
+            return EILSEQ;
+        }
+
+        // A NUL code unit would truncate the POSIX path at the first byte.
+        if (code_point == 0) return EINVAL;
+        if (code_point <= 0x7F) {
+            output->push_back(static_cast<char>(code_point));
+        } else if (code_point <= 0x7FF) {
+            output->push_back(static_cast<char>(0xC0 | (code_point >> 6)));
+            output->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+        } else if (code_point <= 0xFFFF) {
+            output->push_back(static_cast<char>(0xE0 | (code_point >> 12)));
+            output->push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
+            output->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+        } else if (code_point <= 0x10FFFF) {
+            output->push_back(static_cast<char>(0xF0 | (code_point >> 18)));
+            output->push_back(static_cast<char>(0x80 | ((code_point >> 12) & 0x3F)));
+            output->push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
+            output->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+        } else {
+            return EILSEQ;
+        }
+    }
+    return 0;
+}
+
 static jint removePath(JNIEnv* env, jstring path, int (*remove_fn)(const char*)) {
     if (!path) return EINVAL;
-    const char* utf8_path = env->GetStringUTFChars(path, nullptr);
-    if (!utf8_path) return ENOMEM;
-    const int result = remove_fn(utf8_path);
-    const int error = result == 0 ? 0 : errno;
-    env->ReleaseStringUTFChars(path, utf8_path);
-    return error;
+    std::string utf8_path;
+    const jint conversion_error = jstringToStandardUtf8(env, path, &utf8_path);
+    if (conversion_error != 0) return conversion_error;
+    if (remove_fn(utf8_path.c_str()) == 0) return 0;
+    return errno;
 }
 
 extern "C"
