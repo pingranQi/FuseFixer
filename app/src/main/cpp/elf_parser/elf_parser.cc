@@ -329,82 +329,163 @@ namespace elf_parser {
     }
     
     bool Elf::LoadSymbolsForDynamic() {
-        if (dynamic_off_ == 0 || dynamic_size_ == 0) return false;
-        auto dynamic = reinterpret_cast<ElfW(Dyn)*>(GetLoadBias() + dynamic_off_);
+        if (dynamic_off_ == 0 || dynamic_size_ < sizeof(ElfW(Dyn)) ||
+            dynamic_size_ % sizeof(ElfW(Dyn)) != 0 ||
+            load_base_ < vaddr_min_) return false;
+        const uintptr_t bias = load_base_ - vaddr_min_;
+        if (dynamic_off_ > UINTPTR_MAX - bias) return false;
+        const uintptr_t dynamic_address = bias + dynamic_off_;
+        if (!ContainsRuntimeRange(dynamic_address, dynamic_size_)) {
+            LOGE("PT_DYNAMIC exceeds mapped PT_LOAD ranges");
+            return false;
+        }
 
-        for (auto *dynamic_end = dynamic + (dynamic_size_ / sizeof(dynamic[0]));
-             dynamic < dynamic_end; ++dynamic) {
-            switch (dynamic->d_tag) {
-                case DT_NULL:
-                    // the end of the dynamic-section
-                    dynamic = dynamic_end;
+        uintptr_t hash_address = 0;
+        uintptr_t gnu_hash_address = 0;
+        uintptr_t strtab_address = 0;
+        uintptr_t symtab_address = 0;
+        bool found_null = false;
+        bool found_syment = false;
+        for (size_t i = 0; i < dynamic_size_ / sizeof(ElfW(Dyn)); ++i) {
+            const auto &entry = reinterpret_cast<const ElfW(Dyn) *>(dynamic_address)[i];
+            if (entry.d_tag == DT_NULL) {
+                found_null = true;
+                break;
+            }
+            auto pointerFromVaddr = [&](ElfW(Addr) value, uintptr_t *out) {
+                if (value > UINTPTR_MAX - bias) return false;
+                *out = bias + static_cast<uintptr_t>(value);
+                return true;
+            };
+            switch (entry.d_tag) {
+                case DT_STRTAB:
+                    if (!pointerFromVaddr(entry.d_un.d_ptr, &strtab_address)) return false;
                     break;
-                case DT_STRTAB: {
-                    if (!setByOffset(dynstr_, load_base_, GetLoadBias(), dynamic->d_un.d_ptr)) return false;
+                case DT_STRSZ:
+                    dynstr_size_ = static_cast<size_t>(entry.d_un.d_val);
                     break;
-                }
-                case DT_SYMTAB: {
-                    if (!setByOffset(dynsym_, load_base_, GetLoadBias(), dynamic->d_un.d_ptr)) return false;
+                case DT_SYMTAB:
+                    if (!pointerFromVaddr(entry.d_un.d_ptr, &symtab_address)) return false;
                     break;
-                }
+                case DT_SYMENT:
+                    found_syment = entry.d_un.d_val == sizeof(ElfW(Sym));
+                    break;
                 case DT_PLTREL:
-                    // use rel or rela?
-                    is_use_rela_ = dynamic->d_un.d_val == DT_RELA;
+                    if (entry.d_un.d_val != DT_REL && entry.d_un.d_val != DT_RELA)
+                        return false;
+                    is_use_rela_ = entry.d_un.d_val == DT_RELA;
                     break;
-                case DT_JMPREL: {
-                    if (!setByOffset(rel_plt_, load_base_, GetLoadBias(), dynamic->d_un.d_ptr)) return false;
+                case DT_JMPREL:
+                    if (!pointerFromVaddr(entry.d_un.d_ptr,
+                                          reinterpret_cast<uintptr_t *>(&rel_plt_))) return false;
                     break;
-                }
                 case DT_PLTRELSZ:
-                    rel_plt_size_ = dynamic->d_un.d_val;
+                    rel_plt_size_ = entry.d_un.d_val;
                     break;
                 case DT_REL:
-                case DT_RELA: {
-                    if (!setByOffset(rel_dyn_, load_base_, GetLoadBias(), dynamic->d_un.d_ptr)) return false;
+                case DT_RELA:
+                    if (!pointerFromVaddr(entry.d_un.d_ptr,
+                                          reinterpret_cast<uintptr_t *>(&rel_dyn_))) return false;
                     break;
-                }
                 case DT_RELSZ:
                 case DT_RELASZ:
-                    rel_dyn_size_ = dynamic->d_un.d_val;
+                    rel_dyn_size_ = entry.d_un.d_val;
                     break;
-                case DT_ANDROID_REL:
-                case DT_ANDROID_RELA: {
-                    if (!setByOffset(rel_android_, load_base_, GetLoadBias(), dynamic->d_un.d_ptr)) return false;
+                case DT_HASH:
+                    if (!pointerFromVaddr(entry.d_un.d_ptr, &hash_address)) return false;
                     break;
-                }
-                case DT_ANDROID_RELSZ:
-                case DT_ANDROID_RELASZ:
-                    rel_android_size_ = dynamic->d_un.d_val;
+                case DT_GNU_HASH:
+                    if (!pointerFromVaddr(entry.d_un.d_ptr, &gnu_hash_address)) return false;
                     break;
-                case DT_HASH: {
-                    // ignore DT_HASH when ELF contains DT_GNU_HASH hash table
-                    if (gnu_bloom_filter_) continue;
-                    auto *raw = reinterpret_cast<ElfW(Word) *>(GetLoadBias() + dynamic->d_un.d_ptr);
-                    nbucket_ = raw[0];
-                    bucket_ = raw + 2;
-                    chain_ = bucket_ + nbucket_;
-                    break;
-                }
-                case DT_GNU_HASH: {
-                    auto *raw = reinterpret_cast<ElfW(Word) *>(GetLoadBias() + dynamic->d_un.d_ptr);
-                    gnu_nbucket_ = raw[0];
-                    gnu_symndx_ = raw[1];
-                    gnu_bloom_size_ = raw[2];
-                    gnu_shift2_ = raw[3];
-                    if (gnu_shift2_ >= sizeof(uint32_t) * 8 ||
-                        gnu_nbucket_ == 0 || gnu_bloom_size_ == 0 ||
-                        gnu_nbucket_ < gnu_symndx_) return false;
-                    gnu_bloom_filter_ = reinterpret_cast<decltype(gnu_bloom_filter_)>(raw + 4);
-                    gnu_bucket_ = reinterpret_cast<decltype(bucket_)>(gnu_bloom_filter_ + gnu_bloom_size_);
-                    gnu_chain_ = gnu_bucket_ + gnu_nbucket_ - gnu_symndx_;
-                    break;
-                }
                 default:
+                    // Android packed relocations are not ELF Rel/ Rela arrays;
+                    // deliberately do not pass APS2 data to the regular walker.
                     break;
             }
         }
-        
-        return true;
+        if (!found_null || !strtab_address || !symtab_address ||
+            dynstr_size_ == 0 || !found_syment ||
+            !ContainsRuntimeRange(strtab_address, dynstr_size_) ||
+            strtab_address % alignof(char) != 0 ||
+            symtab_address % alignof(ElfW(Sym)) != 0) {
+            LOGE("incomplete or invalid dynamic symbol metadata");
+            return false;
+        }
+        dynstr_ = reinterpret_cast<const char *>(strtab_address);
+        dynsym_ = reinterpret_cast<ElfW(Sym) *>(symtab_address);
+
+        if (hash_address) {
+            if (hash_address % alignof(ElfW(Word)) != 0 ||
+                !ContainsRuntimeRange(hash_address, 2 * sizeof(ElfW(Word)))) return false;
+            auto *raw = reinterpret_cast<ElfW(Word) *>(hash_address);
+            const uint64_t words = 2ULL + raw[0] + raw[1];
+            if (words > SIZE_MAX / sizeof(ElfW(Word)) ||
+                !ContainsRuntimeRange(hash_address,
+                                      static_cast<size_t>(words * sizeof(ElfW(Word))))) {
+                LOGE("DT_HASH table exceeds mapped range");
+                return false;
+            }
+            nbucket_ = raw[0];
+            dynsym_count_ = raw[1];
+            bucket_ = raw + 2;
+            chain_ = bucket_ + nbucket_;
+        }
+
+        if (gnu_hash_address) {
+            if (gnu_hash_address % alignof(ElfW(Word)) != 0 ||
+                !ContainsRuntimeRange(gnu_hash_address, 4 * sizeof(ElfW(Word)))) return false;
+            auto *raw = reinterpret_cast<ElfW(Word) *>(gnu_hash_address);
+            gnu_nbucket_ = raw[0];
+            gnu_symndx_ = raw[1];
+            gnu_bloom_size_ = raw[2];
+            gnu_shift2_ = raw[3];
+            if (gnu_nbucket_ == 0 || gnu_bloom_size_ == 0 ||
+                gnu_shift2_ >= sizeof(uint32_t) * 8) return false;
+            const uint64_t bloom_bytes =
+                    static_cast<uint64_t>(gnu_bloom_size_) * sizeof(ElfW(Addr));
+            const uint64_t bucket_bytes =
+                    static_cast<uint64_t>(gnu_nbucket_) * sizeof(uint32_t);
+            const uint64_t prefix_bytes = 4ULL * sizeof(ElfW(Word)) +
+                                          bloom_bytes + bucket_bytes;
+            if (prefix_bytes > SIZE_MAX ||
+                !ContainsRuntimeRange(gnu_hash_address,
+                                      static_cast<size_t>(prefix_bytes))) return false;
+            gnu_bloom_filter_ = reinterpret_cast<uintptr_t *>(raw + 4);
+            gnu_bucket_ = reinterpret_cast<uint32_t *>(
+                    reinterpret_cast<uint8_t *>(gnu_bloom_filter_) + bloom_bytes);
+            gnu_chain_ = gnu_bucket_ + gnu_nbucket_;
+            gnu_chain_count_ = RuntimeRemaining(
+                    reinterpret_cast<uintptr_t>(gnu_chain_)) / sizeof(uint32_t);
+            const size_t previous_symbol_count = dynsym_count_;
+            if (!ValidateGnuHash(gnu_bucket_, gnu_nbucket_, gnu_chain_,
+                                 gnu_chain_count_) ||
+                (previous_symbol_count != 0 && dynsym_count_ > previous_symbol_count)) {
+                LOGE("invalid or out-of-range DT_GNU_HASH chain");
+                return false;
+            }
+        }
+        if (dynsym_count_ == 0 ||
+            dynsym_count_ > SIZE_MAX / sizeof(ElfW(Sym)) ||
+            !ContainsRuntimeRange(symtab_address,
+                                  dynsym_count_ * sizeof(ElfW(Sym)))) {
+            LOGE("dynamic symbol table exceeds mapped range");
+            return false;
+        }
+
+        if (rel_plt_ != 0) {
+            const size_t entry_size = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+            if (rel_plt_size_ == 0 || rel_plt_size_ % entry_size != 0 ||
+                !ContainsRuntimeRange(rel_plt_, rel_plt_size_)) {
+                LOGE("invalid DT_JMPREL range");
+                return false;
+            }
+        }
+        if (rel_dyn_ != 0 && (rel_dyn_size_ == 0 ||
+            !ContainsRuntimeRange(rel_dyn_, rel_dyn_size_))) {
+            LOGE("invalid dynamic relocation range");
+            return false;
+        }
+        return nbucket_ != 0 || gnu_nbucket_ != 0;
     }
 
     bool Elf::LoadSymbolsForFull() {
