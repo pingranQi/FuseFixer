@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,10 @@
 using namespace std::string_view_literals;
 
 namespace {
+    bool rangeWithin(size_t total, uint64_t offset, uint64_t length) {
+        return offset <= total && length <= static_cast<uint64_t>(total) - offset;
+    }
+
     bool VerifyElfHeader(ElfW(Ehdr) *header) {
         if (0 != memcmp(header->e_ident, ELFMAG, SELFMAG))
             return false;
@@ -107,17 +112,31 @@ namespace {
             close(fd);
             return {0, 0};
         }
-        auto sz = st.st_size - file_off;
-        auto parse_base_ = reinterpret_cast<uintptr_t>(
-                mmap(nullptr, sz, PROT_READ, MAP_SHARED, fd, file_off));
-
+        if (st.st_size <= 0 || file_off > static_cast<uint64_t>(st.st_size)) {
+            LOGE("elf_parser: invalid file offset %zu for size %lld",
+                 file_off, static_cast<long long>(st.st_size));
+            close(fd);
+            return {0, 0};
+        }
+        const long page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0 || file_off % static_cast<size_t>(page_size) != 0) {
+            LOGE("elf_parser: unaligned file offset %zu", file_off);
+            close(fd);
+            return {0, 0};
+        }
+        const size_t sz = static_cast<size_t>(st.st_size) - file_off;
+        if (sz == 0) {
+            LOGE("elf_parser: empty ELF image");
+            close(fd);
+            return {0, 0};
+        }
+        void* mapped = mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, file_off);
         close(fd);
-
-        if (parse_base_ == reinterpret_cast<uintptr_t>(MAP_FAILED)) {
+        if (mapped == MAP_FAILED) {
             PLOGE("elf_parser: mmap %s", path.data());
             return {0, 0};
         }
-        return {parse_base_, sz};
+        return {reinterpret_cast<uintptr_t>(mapped), sz};
     }
 
     template<typename T>
@@ -163,6 +182,7 @@ namespace {
             // Multi-call XZ decoding may still have buffered output after all
             // input bytes have been consumed. Keep draining until the decoder
             // reports STREAM_END or a genuine error/no-progress condition.
+            const size_t in_pos_before = b.in_pos;
             const auto ret = xz_dec_run(dec, &b);
             const size_t produced = b.out_pos;
             if (produced != 0) {
@@ -178,11 +198,13 @@ namespace {
                 out.clear();
                 return out;
             }
-            // With XZ_DYNALLOC, XZ_OK may mean either more input is needed or
-            // buffered output was produced. Calling again after input is
-            // exhausted lets the decoder signal XZ_BUF_ERROR for truncation.
-            if (b.in_pos == b.in_size && produced == 0) {
-                continue;
+            // XZ_OK must make forward progress. Without this guard, a
+            // truncated stream can spin forever once all input is consumed.
+            if (produced == 0 && b.in_pos == in_pos_before) {
+                LOGE("unxz: decoder made no progress (input %zu/%zu)",
+                     b.in_pos, b.in_size);
+                out.clear();
+                return out;
             }
         }
         return out;
@@ -207,14 +229,30 @@ namespace elf_parser {
 
         auto header = reinterpret_cast<decltype(header_)>(parse_base);
 
-        if (!VerifyElfHeader(header)) {
+        if (!VerifyElfHeader(header) || header->e_ehsize != sizeof(ElfW(Ehdr))) {
             LOGE("verify elf header");
             return false;
+        }
+        if (size != 0) {
+            if (header->e_phnum != 0 &&
+                (header->e_phentsize != sizeof(ElfW(Phdr)) ||
+                 !rangeWithin(size, header->e_phoff,
+                              static_cast<uint64_t>(header->e_phnum) * sizeof(ElfW(Phdr))))) {
+                LOGE("invalid ELF program header table");
+                return false;
+            }
+            if (header->e_shnum != 0 &&
+                (header->e_shentsize != sizeof(ElfW(Shdr)) ||
+                 !rangeWithin(size, header->e_shoff,
+                              static_cast<uint64_t>(header->e_shnum) * sizeof(ElfW(Shdr))))) {
+                LOGE("invalid ELF section header table");
+                return false;
+            }
         }
         header_ = header;
 
         // gnu debugdata maybe has no phdr
-        if (header->e_phoff) {
+        if (header->e_phoff && header->e_phnum) {
             auto phdr = reinterpret_cast<ElfW(Phdr) *>(GetParseBase() + header->e_phoff);
             for (auto i = 0; i < header_->e_phnum; i++) {
                 auto &hdr = phdr[i];
