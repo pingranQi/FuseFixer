@@ -372,8 +372,18 @@ namespace elf_parser {
                 break;
             }
             auto pointerFromVaddr = [&](ElfW(Addr) value, uintptr_t *out) {
-                if (value > UINTPTR_MAX - bias) return false;
-                *out = bias + static_cast<uintptr_t>(value);
+                const uintptr_t raw = static_cast<uintptr_t>(value);
+                // Some dynamic linkers relocate d_ptr entries in-place while
+                // others leave ELF virtual addresses. Accept only a candidate
+                // that is actually inside one of this image's PT_LOAD ranges.
+                if (RuntimeRemaining(raw) != 0) {
+                    *out = raw;
+                    return true;
+                }
+                if (raw > UINTPTR_MAX - bias) return false;
+                const uintptr_t relocated = bias + raw;
+                if (RuntimeRemaining(relocated) == 0) return false;
+                *out = relocated;
                 return true;
             };
             switch (entry.d_tag) {
