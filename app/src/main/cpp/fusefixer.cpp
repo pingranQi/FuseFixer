@@ -182,6 +182,7 @@ void remove_default_ignorable_code_point(std::string& str) {
 }
 
 static HookFunType hook_func = nullptr;
+static UnhookFunType unhook_func = nullptr;
 
 static bool install_inline_hook(void* target, void* replacement, void** original,
                                const char* name) {
@@ -194,9 +195,15 @@ static bool install_inline_hook(void* target, void* replacement, void** original
         return false;
     }
     const int result = hook_func(target, replacement, original);
-    if (result != 0 || !original || !*original) {
-        LOGE("hook %s failed: result=%d trampoline=%p", name, result,
-             original ? *original : nullptr);
+    if (result != 0) {
+        LOGE("hook %s failed: result=%d", name, result);
+        return false;
+    }
+    if (!original || !*original) {
+        LOGE("hook %s returned success without a trampoline; attempting rollback", name);
+        if (unhook_func && unhook_func(target) != 0) {
+            LOGE("hook %s rollback failed", name);
+        }
         return false;
     }
     LOGI("hook %s installed", name);
@@ -375,16 +382,31 @@ void on_library_loaded(const char *name, void *handle) {
             if (!name.ends_with(kLibFuseJni)) return false;
             if (!info.dlpi_phdr) return false;
             auto phdrs = info.dlpi_phdr;
-            uintptr_t vaddr_min = UINTPTR_MAX, vaddr_max = 0;
+            uintptr_t vaddr_min = UINTPTR_MAX, vaddr_end = 0;
             for (auto i = 0; i < info.dlpi_phnum; i++) {
-                auto &phdr = phdrs[i];
-                if (phdr.p_type == PT_LOAD) {
-                    if (vaddr_min > phdr.p_vaddr) vaddr_min = phdr.p_vaddr;
-                    if (vaddr_max < phdr.p_vaddr) vaddr_max = phdr.p_vaddr;
+                const auto &phdr = phdrs[i];
+                if (phdr.p_type != PT_LOAD) continue;
+                if (phdr.p_memsz > UINTPTR_MAX - phdr.p_vaddr) {
+                    LOGE("invalid PT_LOAD range in %s", name);
+                    return false;
                 }
+                vaddr_min = std::min(vaddr_min, static_cast<uintptr_t>(phdr.p_vaddr));
+                vaddr_end = std::max(vaddr_end,
+                        static_cast<uintptr_t>(phdr.p_vaddr + phdr.p_memsz));
             }
-            load_sz = vaddr_max - vaddr_min;
+            if (vaddr_min == UINTPTR_MAX || vaddr_end <= vaddr_min ||
+                info.dlpi_addr > UINTPTR_MAX - vaddr_min) {
+                LOGE("invalid load range in %s", name);
+                return false;
+            }
+            load_sz = vaddr_end - vaddr_min;
             base_addr = info.dlpi_addr + vaddr_min;
+            if (load_sz > UINTPTR_MAX - base_addr) {
+                LOGE("load range overflow in %s", name);
+                load_sz = 0;
+                base_addr = 0;
+                return false;
+            }
             return true;
         };
         using Callback = decltype(callback);
@@ -416,7 +438,8 @@ void on_library_loaded(const char *name, void *handle) {
                 off = info.offset;
                 path = info.path;
             }
-            if (info.start >= base_addr && info.end < base_addr + load_sz && info.path == path && (info.perms & PROT_EXEC) != 0) {
+            if (info.start < base_addr + load_sz && info.end > base_addr &&
+                info.path == path && (info.perms & PROT_EXEC) != 0) {
                 exec_addr = info.start;
                 exec_perm = info.perms;
                 exec_sz = info.end - info.start;
@@ -583,9 +606,11 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     if (!entries || !entries->hook_func) {
         LOGE("native_init: missing hook API");
         hook_func = nullptr;
+        unhook_func = nullptr;
         return nullptr;
     }
     hook_func = entries->hook_func;
+    unhook_func = entries->unhook_func;
     return on_library_loaded;
 }
 
