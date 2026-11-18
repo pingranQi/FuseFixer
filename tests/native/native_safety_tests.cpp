@@ -7,6 +7,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <fstream>
+#include <algorithm>
 #include <iostream>
 #include <iterator>
 #include <link.h>
@@ -62,6 +63,30 @@ void testXz() {
     assert(elf_parser::testing::DecompressXz(nullptr, 0).empty());
 }
 
+struct MappedElfRange {
+    uintptr_t base = 0;
+    size_t size = 0;
+};
+
+int findLibcRange(dl_phdr_info *info, size_t, void *opaque) {
+    if (!info->dlpi_name || std::strstr(info->dlpi_name, "libc.so.6") == nullptr)
+        return 0;
+    uintptr_t min_vaddr = UINTPTR_MAX;
+    uintptr_t max_vaddr = 0;
+    for (uint16_t i = 0; i < info->dlpi_phnum; ++i) {
+        const auto &phdr = info->dlpi_phdr[i];
+        if (phdr.p_type != PT_LOAD) continue;
+        min_vaddr = std::min(min_vaddr, static_cast<uintptr_t>(phdr.p_vaddr));
+        max_vaddr = std::max(max_vaddr,
+                static_cast<uintptr_t>(phdr.p_vaddr + phdr.p_memsz));
+    }
+    if (min_vaddr == UINTPTR_MAX || max_vaddr <= min_vaddr) return 0;
+    auto *range = static_cast<MappedElfRange *>(opaque);
+    range->base = static_cast<uintptr_t>(info->dlpi_addr) + min_vaddr;
+    range->size = max_vaddr - min_vaddr;
+    return 1;
+}
+
 void testElfFiles(const char *self) {
     elf_parser::Elf good;
     assert(good.InitFromFile(self, 0, true));
@@ -101,10 +126,12 @@ void testElfFiles(const char *self) {
     // Exercise the dynamic parser against a real mapped shared object.
     void *handle = dlopen("libc.so.6", RTLD_NOW | RTLD_LOCAL);
     assert(handle != nullptr);
-    link_map *map = nullptr;
-    assert(dlinfo(handle, RTLD_DI_LINKMAP, &map) == 0 && map != nullptr);
+    MappedElfRange libc_range;
+    assert(dl_iterate_phdr(findLibcRange, &libc_range) == 1);
+    assert(libc_range.base != 0 && libc_range.size != 0);
     elf_parser::Elf dynamic_elf;
-    assert(dynamic_elf.InitFromMemory(reinterpret_cast<void *>(map->l_addr), true));
+    assert(dynamic_elf.InitFromMemory(
+            reinterpret_cast<void *>(libc_range.base), true, libc_range.size));
     assert(dynamic_elf.getSym("malloc") != nullptr);
     dlclose(handle);
 
