@@ -654,53 +654,64 @@ namespace elf_parser {
     }
 
     ElfW(Sym)* Elf::ElfLookup(std::string_view name, uint32_t hash) const {
-        if (auto idx = ElfLookupIdx(name, hash); idx) {
-            return dynsym_ + idx;
-        }
+        if (auto idx = ElfLookupIdx(name, hash); idx != 0) return dynsym_ + idx;
         return nullptr;
     }
 
     uint32_t Elf::ElfLookupIdx(std::string_view name, uint32_t hash) const {
-        if (nbucket_ == 0)
-            return 0;
-
-        for (auto n = bucket_[hash % nbucket_]; n != 0; n = chain_[n]) {
-            auto *sym = dynsym_ + n;
-            if (name == dynstr_ + sym->st_name) {
-                return n;
+        if (!dynsym_ || !dynstr_ || !bucket_ || !chain_ ||
+            nbucket_ == 0 || dynsym_count_ == 0) return 0;
+        uint32_t index = bucket_[hash % nbucket_];
+        for (size_t steps = 0; index != 0 && steps < dynsym_count_; ++steps) {
+            if (index >= dynsym_count_) return 0;
+            const auto &symbol = dynsym_[index];
+            if (symbol.st_name < dynstr_size_) {
+                const char *symbol_name = dynstr_ + symbol.st_name;
+                const size_t remaining = dynstr_size_ - symbol.st_name;
+                const auto *end = static_cast<const char *>(
+                        memchr(symbol_name, '\0', remaining));
+                if (end && std::string_view(symbol_name,
+                        static_cast<size_t>(end - symbol_name)) == name) return index;
             }
+            index = chain_[index];
         }
         return 0;
     }
 
     ElfW(Sym)* Elf::GnuLookup(std::string_view name, uint32_t hash) const {
-        if (auto idx = GnuLookupIdx(name, hash); idx) {
-            return dynsym_ + idx;
-        }
+        if (auto idx = GnuLookupIdx(name, hash); idx != 0) return dynsym_ + idx;
         return nullptr;
     }
 
     uint32_t Elf::GnuLookupIdx(std::string_view name, uint32_t hash) const {
         static constexpr auto bloom_mask_bits = sizeof(ElfW(Addr)) * 8;
+        if (!dynsym_ || !dynstr_ || !gnu_bloom_filter_ || !gnu_bucket_ ||
+            !gnu_chain_ || gnu_nbucket_ == 0 || gnu_bloom_size_ == 0 ||
+            gnu_chain_count_ == 0 || gnu_shift2_ >= 32) return 0;
 
-        if (gnu_nbucket_ == 0 || gnu_bloom_size_ == 0)
-            return 0;
-
-        auto bloom_word =
+        const auto bloom_word =
                 gnu_bloom_filter_[(hash / bloom_mask_bits) % gnu_bloom_size_];
-        uintptr_t mask = 0 | (uintptr_t) 1 << (hash % bloom_mask_bits) |
-                         (uintptr_t) 1 << ((hash >> gnu_shift2_) % bloom_mask_bits);
-        if ((mask & bloom_word) == mask) {
-            auto sym_index = gnu_bucket_[hash % gnu_nbucket_];
-            if (sym_index >= gnu_symndx_) {
-                do {
-                    auto *sym = dynsym_ + sym_index;
-                    if (((gnu_chain_[sym_index] ^ hash) >> 1) == 0 &&
-                        name == dynstr_ + sym->st_name) {
-                        return sym_index;
-                    }
-                } while ((gnu_chain_[sym_index++] & 1) == 0);
+        const uintptr_t mask = (uintptr_t{1} << (hash % bloom_mask_bits)) |
+                (uintptr_t{1} << ((hash >> gnu_shift2_) % bloom_mask_bits));
+        if ((mask & bloom_word) != mask) return 0;
+
+        uint32_t index = gnu_bucket_[hash % gnu_nbucket_];
+        if (index < gnu_symndx_ || index >= dynsym_count_) return 0;
+        for (size_t steps = 0; steps < gnu_chain_count_; ++steps, ++index) {
+            if (index >= dynsym_count_) return 0;
+            const size_t chain_index = static_cast<size_t>(index - gnu_symndx_);
+            if (chain_index >= gnu_chain_count_) return 0;
+            const uint32_t chain_hash = gnu_chain_[chain_index];
+            const auto &symbol = dynsym_[index];
+            if (((chain_hash ^ hash) >> 1) == 0 && symbol.st_name < dynstr_size_) {
+                const char *symbol_name = dynstr_ + symbol.st_name;
+                const size_t remaining = dynstr_size_ - symbol.st_name;
+                const auto *end = static_cast<const char *>(
+                        memchr(symbol_name, '\0', remaining));
+                if (end && std::string_view(symbol_name,
+                        static_cast<size_t>(end - symbol_name)) == name) return index;
             }
+            if (chain_hash & 1U) break;
         }
         return 0;
     }
@@ -711,8 +722,11 @@ namespace elf_parser {
             if (symtab_ != nullptr && symstr_ != 0) {
                 for (ElfW(Off) i = 0; i < symtab_count_; i++) {
                     unsigned int st_type = ELF_ST_TYPE(symtab_[i].st_info);
+                    if (symtab_[i].st_name >= symstr_size_) continue;
                     const char *st_name = offsetOf<const char *>(
                             header_, symstr_ + symtab_[i].st_name);
+                    const size_t remaining = symstr_size_ - symtab_[i].st_name;
+                    if (!memchr(st_name, '\0', remaining)) continue;
                     if ((st_type == STT_FUNC || st_type == STT_OBJECT) &&
                         symtab_[i].st_size) {
                         symtabs_.emplace(st_name, &symtab_[i]);
@@ -810,12 +824,15 @@ namespace elf_parser {
 
     uint32_t Elf::LinearLookupForDyn(std::string_view name) const {
         if (!for_dynamic_) return 0;
-        if (!dynsym_ || !gnu_symndx_) return 0;
-        for (uint32_t idx = 0; idx < gnu_symndx_; idx++) {
-            auto *sym = dynsym_ + idx;
-            if (name == dynstr_ + sym->st_name) {
-                return idx;
-            }
+        if (!dynsym_ || !dynstr_ || !gnu_symndx_) return 0;
+        for (uint32_t idx = 0; idx < gnu_symndx_ && idx < dynsym_count_; idx++) {
+            const auto &sym = dynsym_[idx];
+            if (sym.st_name >= dynstr_size_) continue;
+            const char *symbol_name = dynstr_ + sym.st_name;
+            const size_t remaining = dynstr_size_ - sym.st_name;
+            const auto *end = static_cast<const char *>(memchr(symbol_name, '\0', remaining));
+            if (end && std::string_view(symbol_name,
+                    static_cast<size_t>(end - symbol_name)) == name) return idx;
         }
         return 0;
     }
