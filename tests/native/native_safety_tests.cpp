@@ -57,10 +57,19 @@ void testUtf16Conversion() {
 
     const char16_t unpaired_high[] = {0xD800};
     const char16_t unpaired_low[] = {0xDC00};
+    const char16_t mismatched_pair[] = {0xD800, u'A'};
     const char16_t embedded_nul[] = {u'a', 0, u'b'};
+    const char16_t max_code_point[] = {0xDBFF, 0xDFFF};
     assert(utf16ToStandardUtf8(unpaired_high, 1, &utf8) == EILSEQ);
+    assert(utf8.empty());
     assert(utf16ToStandardUtf8(unpaired_low, 1, &utf8) == EILSEQ);
+    assert(utf8.empty());
+    assert(utf16ToStandardUtf8(mismatched_pair, 2, &utf8) == EILSEQ);
+    assert(utf8.empty());
     assert(utf16ToStandardUtf8(embedded_nul, 3, &utf8) == EINVAL);
+    assert(utf8.empty());
+    assert(utf16ToStandardUtf8(max_code_point, 2, &utf8) == 0);
+    assert(utf8 == "\xF4\x8F\xBF\xBF");
     assert(utf16ToStandardUtf8(nullptr, 1, &utf8) == EINVAL);
 }
 
