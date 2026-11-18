@@ -33,6 +33,7 @@ target_include_directories(native_safety_tests PRIVATE
 )
 target_compile_definitions(native_safety_tests PRIVATE FUSEFIXER_ENABLE_TEST_API)
 target_link_libraries(native_safety_tests PRIVATE elf_parser_test utf8_utils_test ${CMAKE_DL_LIBS})
+target_link_options(native_safety_tests PRIVATE -Wl,--hash-style=both)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     foreach(target elf_parser_test utf8_utils_test native_safety_tests)
