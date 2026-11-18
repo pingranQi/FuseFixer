@@ -53,6 +53,7 @@ namespace elf_parser {
 
         ElfW(Addr) rel_dyn_ = 0;  //.rel.dyn or .rela.dyn
         ElfW(Word) rel_dyn_size_ = 0;
+        bool rel_dyn_is_rela_ = false;
 
         ElfW(Addr) rel_android_ = 0;  // android compressed rel or rela
         ElfW(Word) rel_android_size_ = 0;
