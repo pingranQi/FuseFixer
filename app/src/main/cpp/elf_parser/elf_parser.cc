@@ -300,24 +300,30 @@ namespace elf_parser {
             auto *phdr = reinterpret_cast<ElfW(Phdr) *>(parse_base + header->e_phoff);
             for (uint16_t i = 0; i < header->e_phnum; ++i) {
                 const auto &entry = phdr[i];
-                if (entry.p_type == PT_LOAD) {
-                    vaddr_min_ = std::min(vaddr_min_, static_cast<uintptr_t>(entry.p_vaddr));
-                    if (load_base_ != 0 && load_base_ >= vaddr_min_ &&
-                        entry.p_memsz <= UINTPTR_MAX - (load_base_ - vaddr_min_) -
-                                         entry.p_vaddr) {
-                        const uintptr_t start = load_base_ - vaddr_min_ + entry.p_vaddr;
-                        if (entry.p_memsz <= SIZE_MAX)
-                            load_ranges_.emplace_back(start, static_cast<size_t>(entry.p_memsz));
-                    }
-                } else if (entry.p_type == PT_DYNAMIC) {
+                if (entry.p_type == PT_LOAD)
+                    vaddr_min_ = std::min(vaddr_min_,
+                            static_cast<uintptr_t>(entry.p_vaddr));
+                else if (entry.p_type == PT_DYNAMIC) {
+                    if (entry.p_memsz > SIZE_MAX) return false;
                     dynamic_off_ = entry.p_vaddr;
                     dynamic_size_ = static_cast<size_t>(entry.p_memsz);
                 }
             }
-        }
-        if (load_base_ != 0 && vaddr_min_ != UINTPTR_MAX && load_base_ < vaddr_min_) {
-            LOGE("invalid ELF load base");
-            return false;
+            if (load_base_ != 0 && vaddr_min_ != UINTPTR_MAX) {
+                if (load_base_ < vaddr_min_) return false;
+                const uintptr_t bias = load_base_ - vaddr_min_;
+                for (uint16_t i = 0; i < header->e_phnum; ++i) {
+                    const auto &entry = phdr[i];
+                    if (entry.p_type != PT_LOAD) continue;
+                    if (entry.p_vaddr > UINTPTR_MAX - bias ||
+                        entry.p_memsz > SIZE_MAX ||
+                        entry.p_memsz > UINTPTR_MAX - (bias + entry.p_vaddr))
+                        return false;
+                    load_ranges_.emplace_back(
+                            bias + static_cast<uintptr_t>(entry.p_vaddr),
+                            static_cast<size_t>(entry.p_memsz));
+                }
+            }
         }
         valid_ = true;
         return true;
@@ -789,10 +795,11 @@ namespace elf_parser {
 
     bool Elf::InitFromMemory(void *addr, bool init_sym) {
         auto a = reinterpret_cast<uintptr_t>(addr);
+        for_dynamic_ = true;
         if (Elf::Init(a, a, 0)) {
-            for_dynamic_ = true;
             return !init_sym || LoadSymbols();
         }
+        for_dynamic_ = false;
         return false;
     }
 
