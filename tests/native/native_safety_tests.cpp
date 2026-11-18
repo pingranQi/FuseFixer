@@ -257,15 +257,13 @@ void testElfFiles(const char *self) {
     auto *sysv_sections = reinterpret_cast<ElfW(Shdr) *>(
             bad_sysv.data() + original_shoff);
     bool has_sysv = false;
-    uint32_t sysv_bucket_count = 0;
     for (uint16_t i = 0; i < original_shnum; ++i) {
         if (sysv_sections[i].sh_type == SHT_GNU_HASH)
             sysv_sections[i].sh_type = SHT_NULL;
         if (sysv_sections[i].sh_type != SHT_HASH) continue;
         auto *words = reinterpret_cast<ElfW(Word) *>(
                 bad_sysv.data() + sysv_sections[i].sh_offset);
-        sysv_bucket_count = words[0];
-        assert(sysv_bucket_count != 0 && words[1] > 1);
+        assert(words[0] != 0 && words[1] > 1);
         words[2] = UINT32_MAX;
         has_sysv = true;
         break;
@@ -273,13 +271,7 @@ void testElfFiles(const char *self) {
     if (has_sysv) {
         auto bad_sysv_path = writeTemp(bad_sysv, "-bad-sysv-chain");
         elf_parser::Elf bad_sysv_elf;
-        assert(bad_sysv_elf.InitFromFile(bad_sysv_path, 0, true));
-        std::string probe;
-        for (unsigned i = 0; i < 100000; ++i) {
-            probe = "fusefixer-sysv-probe-" + std::to_string(i);
-            if (testSysvHash(probe) % sysv_bucket_count == 0) break;
-        }
-        assert(bad_sysv_elf.getSym(probe) == nullptr);
+        assert(!bad_sysv_elf.InitFromFile(bad_sysv_path, 0, true));
         unlink(bad_sysv_path.c_str());
     }
 
