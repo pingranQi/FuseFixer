@@ -219,6 +219,15 @@ namespace {
     }
 } // namespace
 
+#ifdef FUSEFIXER_ENABLE_TEST_API
+namespace elf_parser::testing {
+    std::vector<uint8_t> DecompressXz(const uint8_t *data, size_t size) {
+        if (!data && size != 0) return {};
+        return unxz(data, size);
+    }
+}
+#endif
+
 namespace elf_parser {
     bool Elf::ContainsRuntimeRange(uintptr_t address, size_t size) const {
         if (size == 0 || address > UINTPTR_MAX - size) return false;
