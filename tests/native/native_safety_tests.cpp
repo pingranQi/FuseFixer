@@ -2,6 +2,7 @@
 #include "utf8_utils.hpp"
 
 #include <cassert>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
