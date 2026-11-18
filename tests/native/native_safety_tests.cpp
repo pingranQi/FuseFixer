@@ -108,6 +108,17 @@ int findLibcRange(dl_phdr_info *info, size_t, void *opaque) {
     return 1;
 }
 
+uint32_t testSysvHash(std::string_view name) {
+    uint32_t hash = 0;
+    for (unsigned char ch : name) {
+        hash = (hash << 4) + ch;
+        const uint32_t high = hash & 0xF0000000U;
+        hash ^= high;
+        hash ^= high >> 24;
+    }
+    return hash;
+}
+
 void testElfFiles(const char *self) {
     elf_parser::Elf good;
     assert(good.InitFromFile(self, 0, true));
@@ -142,6 +153,60 @@ void testElfFiles(const char *self) {
         elf_parser::Elf bad_section_elf;
         assert(!bad_section_elf.InitFromFile(bad_section_path, 0, true));
         unlink(bad_section_path.c_str());
+    }
+
+    if (changed) {
+        auto bad_chain = bytes;
+        auto *bad_chain_sections = reinterpret_cast<ElfW(Shdr) *>(
+                bad_chain.data() + original_shoff);
+        for (uint16_t i = 0; i < original_shnum; ++i) {
+            if (bad_chain_sections[i].sh_type != SHT_GNU_HASH) continue;
+            auto *words = reinterpret_cast<ElfW(Word) *>(
+                    bad_chain.data() + bad_chain_sections[i].sh_offset);
+            const uint32_t bucket_count = words[0];
+            const uint32_t bloom_count = words[2];
+            assert(bucket_count != 0);
+            auto *buckets = reinterpret_cast<uint32_t *>(
+                    words + 4 + (static_cast<size_t>(bloom_count) *
+                                sizeof(ElfW(Addr)) / sizeof(ElfW(Word))));
+            buckets[0] = UINT32_MAX;
+            break;
+        }
+        auto bad_chain_path = writeTemp(bad_chain, "-bad-gnu-chain");
+        elf_parser::Elf bad_chain_elf;
+        assert(!bad_chain_elf.InitFromFile(bad_chain_path, 0, true));
+        unlink(bad_chain_path.c_str());
+    }
+
+    // Exercise SysV chain-index guards independently of GNU hash lookup.
+    auto bad_sysv = bytes;
+    auto *sysv_sections = reinterpret_cast<ElfW(Shdr) *>(
+            bad_sysv.data() + original_shoff);
+    bool has_sysv = false;
+    uint32_t sysv_bucket_count = 0;
+    for (uint16_t i = 0; i < original_shnum; ++i) {
+        if (sysv_sections[i].sh_type == SHT_GNU_HASH)
+            sysv_sections[i].sh_type = SHT_NULL;
+        if (sysv_sections[i].sh_type != SHT_HASH) continue;
+        auto *words = reinterpret_cast<ElfW(Word) *>(
+                bad_sysv.data() + sysv_sections[i].sh_offset);
+        sysv_bucket_count = words[0];
+        assert(sysv_bucket_count != 0 && words[1] > 1);
+        words[2] = UINT32_MAX;
+        has_sysv = true;
+        break;
+    }
+    if (has_sysv) {
+        auto bad_sysv_path = writeTemp(bad_sysv, "-bad-sysv-chain");
+        elf_parser::Elf bad_sysv_elf;
+        assert(bad_sysv_elf.InitFromFile(bad_sysv_path, 0, true));
+        std::string probe;
+        for (unsigned i = 0; i < 100000; ++i) {
+            probe = "fusefixer-sysv-probe-" + std::to_string(i);
+            if (testSysvHash(probe) % sysv_bucket_count == 0) break;
+        }
+        assert(bad_sysv_elf.getSym(probe) == nullptr);
+        unlink(bad_sysv_path.c_str());
     }
 
     // Exercise the dynamic parser against a real mapped shared object.
