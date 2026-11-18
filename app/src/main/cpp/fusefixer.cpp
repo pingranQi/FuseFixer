@@ -508,29 +508,56 @@ void on_library_loaded(const char *name, void *handle) {
                     writable_pages.push_back(page);
                 }
 
-                // Detect a concurrent loader/relocator update before writing.
+                // Atomically claim each slot. A loader or another hook may
+                // update a relocation after preflight; never overwrite that
+                // concurrent value with an unconditional store.
+                size_t patched_count = 0;
+                bool patch_conflict = false;
                 for (const auto &patch : patches) {
                     auto **slot_ptr = reinterpret_cast<void **>(patch.slot);
-                    if (__atomic_load_n(slot_ptr, __ATOMIC_ACQUIRE) != patch.original) {
-                        LOGE("PLT slot changed during preflight for %s", show_name);
-                        for (auto it = writable_pages.rbegin();
-                             it != writable_pages.rend(); ++it) {
-                            if (mprotect(reinterpret_cast<void*>(*it), pgsz,
-                                         pages[*it]) != 0)
-                                PLOGE("restore PLT page after preflight race");
-                        }
-                        return false;
+                    void *expected = patch.original;
+                    if (!__atomic_compare_exchange_n(slot_ptr, &expected, hook,
+                            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                        LOGE("PLT slot changed during transaction for %s", show_name);
+                        patch_conflict = true;
+                        break;
                     }
-                }
-
-                void *previous_original = *old;
-                for (const auto &patch : patches) {
-                    auto **slot_ptr = reinterpret_cast<void **>(patch.slot);
-                    __atomic_store_n(slot_ptr, hook, __ATOMIC_RELEASE);
+                    ++patched_count;
                     __builtin___clear_cache(reinterpret_cast<char*>(patch.page),
                             reinterpret_cast<char*>(patch.page + pgsz));
                 }
 
+                if (patch_conflict) {
+                    bool slots_rolled_back = true;
+                    for (size_t i = patched_count; i > 0; --i) {
+                        const auto &patch = patches[i - 1];
+                        auto **slot_ptr = reinterpret_cast<void **>(patch.slot);
+                        void *expected = hook;
+                        if (!__atomic_compare_exchange_n(slot_ptr, &expected,
+                                patch.original, false, __ATOMIC_ACQ_REL,
+                                __ATOMIC_ACQUIRE)) {
+                            LOGE("CRITICAL: concurrent change prevented PLT rollback for %s",
+                                 show_name);
+                            slots_rolled_back = false;
+                        }
+                    }
+                    for (const auto &patch : patches) {
+                        __builtin___clear_cache(reinterpret_cast<char*>(patch.page),
+                                reinterpret_cast<char*>(patch.page + pgsz));
+                    }
+                    for (auto it = writable_pages.rbegin();
+                         it != writable_pages.rend(); ++it) {
+                        if (mprotect(reinterpret_cast<void*>(*it), pgsz,
+                                     pages[*it]) != 0)
+                            PLOGE("restore PLT page after transaction conflict");
+                    }
+                    if (!slots_rolled_back)
+                        LOGE("CRITICAL: PLT slots for %s may require manual recovery",
+                             show_name);
+                    return false;
+                }
+
+                void *previous_original = *old;
                 *old = common_original;
                 bool protections_restored = true;
                 for (auto it = writable_pages.rbegin(); it != writable_pages.rend(); ++it) {
