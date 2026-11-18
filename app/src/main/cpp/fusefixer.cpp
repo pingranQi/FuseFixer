@@ -1,7 +1,6 @@
 #include <string>
 #include <string_view>
 #include <algorithm>
-#include <atomic>
 #include <map>
 #include <vector>
 #include <cstdint>
@@ -450,9 +449,8 @@ void on_library_loaded(const char *name, void *handle) {
                         return false;
                     }
 
-                    auto &slot_ref = *reinterpret_cast<void **>(slot);
-                    void *current = std::atomic_ref<void*>(slot_ref).load(
-                            std::memory_order_acquire);
+                    auto **slot_ptr = reinterpret_cast<void **>(slot);
+                    void *current = __atomic_load_n(slot_ptr, __ATOMIC_ACQUIRE);
                     if (current == hook) {
                         saw_already_hooked = true;
                         continue;
@@ -512,9 +510,8 @@ void on_library_loaded(const char *name, void *handle) {
 
                 // Detect a concurrent loader/relocator update before writing.
                 for (const auto &patch : patches) {
-                    auto &slot_ref = *reinterpret_cast<void **>(patch.slot);
-                    if (std::atomic_ref<void*>(slot_ref).load(std::memory_order_acquire)
-                        != patch.original) {
+                    auto **slot_ptr = reinterpret_cast<void **>(patch.slot);
+                    if (__atomic_load_n(slot_ptr, __ATOMIC_ACQUIRE) != patch.original) {
                         LOGE("PLT slot changed during preflight for %s", show_name);
                         for (auto it = writable_pages.rbegin();
                              it != writable_pages.rend(); ++it) {
@@ -526,13 +523,15 @@ void on_library_loaded(const char *name, void *handle) {
                     }
                 }
 
+                const void *previous_original = *old;
                 for (const auto &patch : patches) {
-                    auto &slot_ref = *reinterpret_cast<void **>(patch.slot);
-                    std::atomic_ref<void*>(slot_ref).store(hook, std::memory_order_release);
+                    auto **slot_ptr = reinterpret_cast<void **>(patch.slot);
+                    __atomic_store_n(slot_ptr, hook, __ATOMIC_RELEASE);
                     __builtin___clear_cache(reinterpret_cast<char*>(patch.page),
                             reinterpret_cast<char*>(patch.page + pgsz));
                 }
 
+                *old = common_original;
                 bool protections_restored = true;
                 for (auto it = writable_pages.rbegin(); it != writable_pages.rend(); ++it) {
                     if (mprotect(reinterpret_cast<void*>(*it), pgsz, pages[*it]) != 0) {
@@ -553,14 +552,15 @@ void on_library_loaded(const char *name, void *handle) {
                     }
                     if (rollback_writable) {
                         for (const auto &patch : patches) {
-                            auto &slot_ref = *reinterpret_cast<void **>(patch.slot);
-                            std::atomic_ref<void*>(slot_ref).store(
-                                    patch.original, std::memory_order_release);
+                            auto **slot_ptr = reinterpret_cast<void **>(patch.slot);
+                            __atomic_store_n(slot_ptr, patch.original, __ATOMIC_RELEASE);
                             __builtin___clear_cache(reinterpret_cast<char*>(patch.page),
                                     reinterpret_cast<char*>(patch.page + pgsz));
                         }
+                        *old = const_cast<void *>(previous_original);
                     } else {
                         LOGE("CRITICAL: unable to fully roll back PLT hook %s", show_name);
+                        *old = common_original;
                     }
                     for (const auto &[page, protection] : pages) {
                         if (mprotect(reinterpret_cast<void*>(page), pgsz, protection) != 0)
@@ -569,7 +569,6 @@ void on_library_loaded(const char *name, void *handle) {
                     return false;
                 }
 
-                *old = common_original;
                 LOGI("installed PLT hook %s in %zu slot(s)",
                      show_name, patches.size());
                 return true;
