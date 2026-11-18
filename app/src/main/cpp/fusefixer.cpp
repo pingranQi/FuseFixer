@@ -387,7 +387,7 @@ void on_library_loaded(const char *name, void *handle) {
                 const auto &phdr = phdrs[i];
                 if (phdr.p_type != PT_LOAD) continue;
                 if (phdr.p_memsz > UINTPTR_MAX - phdr.p_vaddr) {
-                    LOGE("invalid PT_LOAD range in %s", name);
+                    LOGE("invalid PT_LOAD range in %s", info.dlpi_name);
                     return false;
                 }
                 vaddr_min = std::min(vaddr_min, static_cast<uintptr_t>(phdr.p_vaddr));
@@ -396,13 +396,13 @@ void on_library_loaded(const char *name, void *handle) {
             }
             if (vaddr_min == UINTPTR_MAX || vaddr_end <= vaddr_min ||
                 info.dlpi_addr > UINTPTR_MAX - vaddr_min) {
-                LOGE("invalid load range in %s", name);
+                LOGE("invalid load range in %s", info.dlpi_name);
                 return false;
             }
             load_sz = vaddr_end - vaddr_min;
             base_addr = info.dlpi_addr + vaddr_min;
             if (load_sz > UINTPTR_MAX - base_addr) {
-                LOGE("load range overflow in %s", name);
+                LOGE("load range overflow in %s", info.dlpi_name);
                 load_sz = 0;
                 base_addr = 0;
                 return false;
