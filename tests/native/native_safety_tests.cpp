@@ -91,6 +91,13 @@ void testXz() {
     const uint8_t garbage[] = {0, 1, 2, 3, 4, 5};
     assert(elf_parser::testing::DecompressXz(garbage, sizeof(garbage)).empty());
     assert(elf_parser::testing::DecompressXz(nullptr, 0).empty());
+    for (size_t size = 1; size < 256; ++size) {
+        std::vector<uint8_t> malformed(size);
+        for (size_t i = 0; i < size; ++i)
+            malformed[i] = static_cast<uint8_t>((i * 73 + size * 29) & 0xff);
+        assert(elf_parser::testing::DecompressXz(
+                malformed.data(), malformed.size()).empty());
+    }
 }
 
 struct MappedElfRange {
@@ -146,6 +153,24 @@ void testElfFiles(const char *self) {
     assert(!bad_header_elf.InitFromFile(bad_header_path, 0, true));
     unlink(bad_header_path.c_str());
 
+    auto bad_phdr = bytes;
+    auto *bad_phdr_ehdr = reinterpret_cast<ElfW(Ehdr) *>(bad_phdr.data());
+    bad_phdr_ehdr->e_phoff = static_cast<ElfW(Off)>(bad_phdr.size() - 1);
+    auto bad_phdr_path = writeTemp(bad_phdr, "-bad-phdr");
+    elf_parser::Elf bad_phdr_elf;
+    assert(!bad_phdr_elf.InitFromFile(bad_phdr_path, 0, true));
+    unlink(bad_phdr_path.c_str());
+
+    auto bad_phentsize = bytes;
+    auto *bad_phentsize_ehdr = reinterpret_cast<ElfW(Ehdr) *>(bad_phentsize.data());
+    if (bad_phentsize_ehdr->e_phnum != 0) {
+        bad_phentsize_ehdr->e_phentsize = 1;
+        auto bad_phentsize_path = writeTemp(bad_phentsize, "-bad-phentsize");
+        elf_parser::Elf bad_phentsize_elf;
+        assert(!bad_phentsize_elf.InitFromFile(bad_phentsize_path, 0, true));
+        unlink(bad_phentsize_path.c_str());
+    }
+
     auto bad_section = bytes;
     auto *section_header = reinterpret_cast<ElfW(Shdr) *>(
             bad_section.data() + original_shoff);
@@ -185,6 +210,45 @@ void testElfFiles(const char *self) {
         elf_parser::Elf bad_chain_elf;
         assert(!bad_chain_elf.InitFromFile(bad_chain_path, 0, true));
         unlink(bad_chain_path.c_str());
+    }
+
+    // Oversized GNU hash dimensions must be rejected before pointer math.
+    auto bad_gnu_dimensions = bytes;
+    auto *gnu_dim_sections = reinterpret_cast<ElfW(Shdr) *>(
+            bad_gnu_dimensions.data() + original_shoff);
+    bool has_gnu_dimensions = false;
+    for (uint16_t i = 0; i < original_shnum; ++i) {
+        if (gnu_dim_sections[i].sh_type != SHT_GNU_HASH) continue;
+        auto *words = reinterpret_cast<ElfW(Word) *>(
+                bad_gnu_dimensions.data() + gnu_dim_sections[i].sh_offset);
+        words[0] = UINT32_MAX;
+        has_gnu_dimensions = true;
+        break;
+    }
+    if (has_gnu_dimensions) {
+        auto bad_gnu_path = writeTemp(bad_gnu_dimensions, "-bad-gnu-dimensions");
+        elf_parser::Elf bad_gnu_elf;
+        assert(!bad_gnu_elf.InitFromFile(bad_gnu_path, 0, true));
+        unlink(bad_gnu_path.c_str());
+    }
+
+    auto bad_sysv_dimensions = bytes;
+    auto *sysv_dim_sections = reinterpret_cast<ElfW(Shdr) *>(
+            bad_sysv_dimensions.data() + original_shoff);
+    bool has_sysv_dimensions = false;
+    for (uint16_t i = 0; i < original_shnum; ++i) {
+        if (sysv_dim_sections[i].sh_type != SHT_HASH) continue;
+        auto *words = reinterpret_cast<ElfW(Word) *>(
+                bad_sysv_dimensions.data() + sysv_dim_sections[i].sh_offset);
+        words[0] = UINT32_MAX;
+        has_sysv_dimensions = true;
+        break;
+    }
+    if (has_sysv_dimensions) {
+        auto bad_sysv_path = writeTemp(bad_sysv_dimensions, "-bad-sysv-dimensions");
+        elf_parser::Elf bad_sysv_elf;
+        assert(!bad_sysv_elf.InitFromFile(bad_sysv_path, 0, true));
+        unlink(bad_sysv_path.c_str());
     }
 
     // Exercise SysV chain-index guards independently of GNU hash lookup.
