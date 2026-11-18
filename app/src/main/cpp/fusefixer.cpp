@@ -627,41 +627,9 @@ static jint jstringToStandardUtf8(JNIEnv *env, jstring value, std::string *outpu
         }
     } guard{env, value, chars};
 
-    output->clear();
-    output->reserve(static_cast<size_t>(length) * 3);
-    for (jsize i = 0; i < length; ++i) {
-        uint32_t code_point = chars[i];
-        if (code_point >= 0xD800 && code_point <= 0xDBFF) {
-            if (i + 1 >= length) return EILSEQ;
-            const uint32_t low = chars[++i];
-            if (low < 0xDC00 || low > 0xDFFF) return EILSEQ;
-            code_point = 0x10000 + ((code_point - 0xD800) << 10) +
-                         (low - 0xDC00);
-        } else if (code_point >= 0xDC00 && code_point <= 0xDFFF) {
-            return EILSEQ;
-        }
-
-        // A NUL code unit would truncate the POSIX path at the first byte.
-        if (code_point == 0) return EINVAL;
-        if (code_point <= 0x7F) {
-            output->push_back(static_cast<char>(code_point));
-        } else if (code_point <= 0x7FF) {
-            output->push_back(static_cast<char>(0xC0 | (code_point >> 6)));
-            output->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
-        } else if (code_point <= 0xFFFF) {
-            output->push_back(static_cast<char>(0xE0 | (code_point >> 12)));
-            output->push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
-            output->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
-        } else if (code_point <= 0x10FFFF) {
-            output->push_back(static_cast<char>(0xF0 | (code_point >> 18)));
-            output->push_back(static_cast<char>(0x80 | ((code_point >> 12) & 0x3F)));
-            output->push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
-            output->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
-        } else {
-            return EILSEQ;
-        }
-    }
-    return 0;
+    return utf16ToStandardUtf8(
+            reinterpret_cast<const char16_t *>(chars),
+            static_cast<size_t>(length), output);
 }
 
 static jint removePath(JNIEnv* env, jstring path, int (*remove_fn)(const char*)) {
