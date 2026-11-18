@@ -123,7 +123,7 @@ public class MainActivity extends Activity {
         mInfoTextView.append("Kernel: " + uname.release + "\n");
         mInfoTextView.append("Release: " + Build.VERSION.RELEASE + "\n");
         mInfoTextView.append("Device: " + Build.DEVICE + "\n");
-        mInfoTextView.append("SDK: " + Build.VERSION.SDK_INT_FULL + "\n");
+        mInfoTextView.append("SDK: " + Build.VERSION.SDK_INT + "\n");
         var sdcardFs = getBoolProp("external_storage.sdcardfs.enabled");
         if (sdcardFs) mInfoTextView.append("sdcardfs=true\n");
 
