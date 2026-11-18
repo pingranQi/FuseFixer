@@ -44,6 +44,25 @@ void testUtf8() {
     assert(strcasecmp_fix(nullptr, nullptr) == 0);
 }
 
+void testUtf16Conversion() {
+    std::string utf8;
+    const char16_t ascii_and_bmp[] = u"A\u03A9";
+    assert(utf16ToStandardUtf8(ascii_and_bmp, 2, &utf8) == 0);
+    assert(utf8 == "A\xCE\xA9");
+
+    const char16_t supplementary[] = u"\U0001F600";
+    assert(utf16ToStandardUtf8(supplementary, 2, &utf8) == 0);
+    assert(utf8 == "\xF0\x9F\x98\x80");
+
+    const char16_t unpaired_high[] = {0xD800};
+    const char16_t unpaired_low[] = {0xDC00};
+    const char16_t embedded_nul[] = {u'a', 0, u'b'};
+    assert(utf16ToStandardUtf8(unpaired_high, 1, &utf8) == EILSEQ);
+    assert(utf16ToStandardUtf8(unpaired_low, 1, &utf8) == EILSEQ);
+    assert(utf16ToStandardUtf8(embedded_nul, 3, &utf8) == EINVAL);
+    assert(utf16ToStandardUtf8(nullptr, 1, &utf8) == EINVAL);
+}
+
 void testXz() {
     static constexpr char valid_hex[] =
         "fd377a585a000004e6d6b4460200210116000000742fe5a301002046757365"
@@ -153,6 +172,7 @@ void testElfFiles(const char *self) {
 int main(int argc, char **argv) {
     assert(argc == 1 || argc == 2);
     testUtf8();
+    testUtf16Conversion();
     testXz();
     testElfFiles(argc == 2 ? argv[1] : argv[0]);
     std::cout << "FuseFixer native safety tests passed\n";
