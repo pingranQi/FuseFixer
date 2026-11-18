@@ -159,26 +159,31 @@ namespace {
                 .out = buf,
                 .out_pos = 0,
                 .out_size = sizeof(buf)};
-        enum xz_ret ret;
-        do {
-            ret = xz_dec_run(dec, &b);
-            if (ret != XZ_OK && ret != XZ_STREAM_END) {
-                LOGE("unxz error: %d", ret);
-                out.clear();
-                return out;
+        while (true) {
+            // Multi-call XZ decoding may still have buffered output after all
+            // input bytes have been consumed. Keep draining until the decoder
+            // reports STREAM_END or a genuine error/no-progress condition.
+            const auto ret = xz_dec_run(dec, &b);
+            const size_t produced = b.out_pos;
+            if (produced != 0) {
+                out.insert(out.end(), buf, buf + produced);
             }
-            out.insert(out.end(), buf, buf + b.out_pos);
             b.out_pos = 0;
-            if (ret == XZ_STREAM_END) break;
-            if (b.in_pos == size && b.out_pos == 0 && ret == XZ_OK) {
-                LOGE("unxz: incomplete stream");
+
+            if (ret == XZ_STREAM_END) {
+                break;
+            }
+            if (ret != XZ_OK) {
+                LOGE("unxz error: %d (input %zu/%zu)", ret, b.in_pos, b.in_size);
                 out.clear();
                 return out;
             }
-        } while (b.in_pos < size);
-        if (ret != XZ_STREAM_END) {
-            LOGE("unxz: stream did not terminate cleanly");
-            out.clear();
+            // With XZ_DYNALLOC, XZ_OK may mean either more input is needed or
+            // buffered output was produced. Calling again after input is
+            // exhausted lets the decoder signal XZ_BUF_ERROR for truncation.
+            if (b.in_pos == b.in_size && produced == 0) {
+                continue;
+            }
         }
         return out;
     }
