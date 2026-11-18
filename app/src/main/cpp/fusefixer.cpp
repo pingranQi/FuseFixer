@@ -391,7 +391,7 @@ void on_library_loaded(const char *name, void *handle) {
 
         {
             elf_parser::Elf elf{};
-            if (!elf.InitFromMemory((void*) base_addr, true)) {
+            if (!elf.InitFromMemory((void*) base_addr, true, load_sz)) {
                 LOGE("init elf for dyn failed");
                 return;
             }
