@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <cerrno>
 
-#include <unicode/utf8.h>
 
 #include <link.h>
 #include <unistd.h>
@@ -18,6 +17,7 @@
 #include "elf_parser.hpp"
 #include "maps_scan.hpp"
 #include "logging.h"
+#include "utf8_utils.hpp"
 
 #include "fuse.h"
 #include <jni.h>
@@ -29,41 +29,6 @@
  * together for a case independent comparison.  The mappings are
  * based upon ascii character sequences.
  */
-static const char charmap[] = {
-    '\000', '\001', '\002', '\003', '\004', '\005', '\006', '\007',
-    '\010', '\011', '\012', '\013', '\014', '\015', '\016', '\017',
-    '\020', '\021', '\022', '\023', '\024', '\025', '\026', '\027',
-    '\030', '\031', '\032', '\033', '\034', '\035', '\036', '\037',
-    '\040', '\041', '\042', '\043', '\044', '\045', '\046', '\047',
-    '\050', '\051', '\052', '\053', '\054', '\055', '\056', '\057',
-    '\060', '\061', '\062', '\063', '\064', '\065', '\066', '\067',
-    '\070', '\071', '\072', '\073', '\074', '\075', '\076', '\077',
-    '\100', '\141', '\142', '\143', '\144', '\145', '\146', '\147',
-    '\150', '\151', '\152', '\153', '\154', '\155', '\156', '\157',
-    '\160', '\161', '\162', '\163', '\164', '\165', '\166', '\167',
-    '\170', '\171', '\172', '\133', '\134', '\135', '\136', '\137',
-    '\140', '\141', '\142', '\143', '\144', '\145', '\146', '\147',
-    '\150', '\151', '\152', '\153', '\154', '\155', '\156', '\157',
-    '\160', '\161', '\162', '\163', '\164', '\165', '\166', '\167',
-    '\170', '\171', '\172', '\173', '\174', '\175', '\176', '\177',
-    '\200', '\201', '\202', '\203', '\204', '\205', '\206', '\207',
-    '\210', '\211', '\212', '\213', '\214', '\215', '\216', '\217',
-    '\220', '\221', '\222', '\223', '\224', '\225', '\226', '\227',
-    '\230', '\231', '\232', '\233', '\234', '\235', '\236', '\237',
-    '\240', '\241', '\242', '\243', '\244', '\245', '\246', '\247',
-    '\250', '\251', '\252', '\253', '\254', '\255', '\256', '\257',
-    '\260', '\261', '\262', '\263', '\264', '\265', '\266', '\267',
-    '\270', '\271', '\272', '\273', '\274', '\275', '\276', '\277',
-    '\300', '\301', '\302', '\303', '\304', '\305', '\306', '\307',
-    '\310', '\311', '\312', '\313', '\314', '\315', '\316', '\317',
-    '\320', '\321', '\322', '\323', '\324', '\325', '\326', '\327',
-    '\330', '\331', '\332', '\333', '\334', '\335', '\336', '\337',
-    '\340', '\341', '\342', '\343', '\344', '\345', '\346', '\347',
-    '\350', '\351', '\352', '\353', '\354', '\355', '\356', '\357',
-    '\360', '\361', '\362', '\363', '\364', '\365', '\366', '\367',
-    '\370', '\371', '\372', '\373', '\374', '\375', '\376', '\377',
-};
-
 std::string escape_string(std::string_view sv) {
     std::string os;
     char buf[8];
@@ -76,112 +41,6 @@ std::string escape_string(std::string_view sv) {
         }
     }
     return os;
-}
-
-// https://cs.android.com/android/kernel/superproject/+/common-android-mainline:common/fs/unicode/mkutf8data.c;l=2233;drc=231825b2e1ff6ba799c5eaf396d3ab2354e37c6b
-// https://www.unicode.org/Public/12.1.0/ucd/DerivedCoreProperties.txt
-// Default_Ignorable_Code_Point
-inline bool is_default_ignorable_code_point(UChar32 ch) {
-    return  ch == 0x00AD ||
-            ch == 0x034F ||
-            ch == 0x061C ||
-            (0x115F <= ch && ch <= 0x1160) ||
-            (0x17B4 <= ch && ch <= 0x17B5) ||
-            (0x180B <= ch && ch <= 0x180E) ||
-            (0x200B <= ch && ch <= 0x200F) ||
-            (0x202A <= ch && ch <= 0x202E) ||
-            (0x2060 <= ch && ch <= 0x206F) ||
-            ch == 0x3164 ||
-            (0xFE00 <= ch && ch <= 0xFE0F) ||
-            ch == 0xFEFF ||
-            ch == 0xFFA0 ||
-            (0xFFF0 <= ch && ch <= 0xFFF8) ||
-            (0x1BCA0 <= ch && ch <= 0x1BCA3) ||
-            (0x1D173 <= ch && ch <= 0x1D17A) ||
-            (0xE0000 <= ch && ch <= 0xE0FFF);
-}
-
-void remove_default_ignorable_code_point(std::string& str);
-
-int svcasecmp_fix(std::string_view sv1, std::string_view sv2) {
-    // Normalize only Unicode default-ignorable code points. Preserve malformed
-    // UTF-8 bytes verbatim so comparisons remain bounded and deterministic.
-    const auto normalize = [](std::string_view input) {
-        std::string output;
-        output.reserve(input.size());
-        const auto* bytes = reinterpret_cast<const uint8_t*>(input.data());
-        int32_t index = 0;
-        const auto length = static_cast<int32_t>(input.size());
-        while (index < length) {
-            const int32_t start = index;
-            UChar32 ch = 0;
-            U8_NEXT(bytes, index, length, ch);
-            if (ch < 0) [[unlikely]] {
-                LOGW("invalid UTF-8 at %d-%d", start, index);
-                output.append(input.data() + start, static_cast<size_t>(index - start));
-            } else if (!is_default_ignorable_code_point(ch)) {
-                output.append(input.data() + start, static_cast<size_t>(index - start));
-            }
-        }
-        return output;
-    };
-
-    const auto lhs = normalize(sv1);
-    const auto rhs = normalize(sv2);
-    const auto common = std::min(lhs.size(), rhs.size());
-    for (size_t i = 0; i < common; ++i) {
-        const auto left = static_cast<uint8_t>(lhs[i]);
-        const auto right = static_cast<uint8_t>(rhs[i]);
-        const auto folded_left = static_cast<uint8_t>(charmap[left]);
-        const auto folded_right = static_cast<uint8_t>(charmap[right]);
-        if (folded_left != folded_right) {
-            return static_cast<int>(folded_left) - static_cast<int>(folded_right);
-        }
-    }
-    if (lhs.size() == rhs.size()) return 0;
-    return lhs.size() < rhs.size() ? -1 : 1;
-}
-
-int strcasecmp_fix(const char *s1, const char *s2) {
-    return svcasecmp_fix(std::string_view{s1, strlen(s1)}, std::string_view{s2, strlen(s2)});
-}
-
-bool has_default_ignorable_code_point(const std::string& str) {
-    auto buf = str.data();
-    auto len = str.size();
-    auto* s = reinterpret_cast<const uint8_t*>(buf);
-    size_t i = 0;
-    UChar32 ch;
-    while (i < len) {
-        U8_NEXT(s, i, len, ch);
-        if (ch >= 0 && is_default_ignorable_code_point(ch)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void remove_default_ignorable_code_point(std::string& str) {
-    auto buf = str.data();
-    auto len = str.size();
-    auto* s = reinterpret_cast<uint8_t*>(buf);
-    size_t i = 0, j = 0, prev;
-    UChar32 ch;
-    while (i < len) {
-        prev = i;
-        U8_NEXT(s, i, len, ch);
-        if (ch < 0) {
-            LOGW("invalid char at %zu-%zu : %s", prev, i, escape_string(str).c_str());
-            while (prev < i) {
-                buf[j++] = static_cast<char>(s[prev++]);
-            }
-        } else if (!is_default_ignorable_code_point(ch)) {
-            while (prev < i) {
-                buf[j++] = (char) s[prev++];
-            }
-        }
-    }
-    str.resize(j);
 }
 
 static HookFunType hook_func = nullptr;
