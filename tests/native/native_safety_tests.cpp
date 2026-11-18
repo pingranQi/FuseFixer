@@ -71,6 +71,7 @@ void testUtf16Conversion() {
     assert(utf16ToStandardUtf8(max_code_point, 2, &utf8) == 0);
     assert(utf8 == "\xF4\x8F\xBF\xBF");
     assert(utf16ToStandardUtf8(nullptr, 1, &utf8) == EINVAL);
+    assert(utf8.empty());
 }
 
 void testXz() {
