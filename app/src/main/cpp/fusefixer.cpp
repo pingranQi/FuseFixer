@@ -523,7 +523,7 @@ void on_library_loaded(const char *name, void *handle) {
                     }
                 }
 
-                const void *previous_original = *old;
+                void *previous_original = *old;
                 for (const auto &patch : patches) {
                     auto **slot_ptr = reinterpret_cast<void **>(patch.slot);
                     __atomic_store_n(slot_ptr, hook, __ATOMIC_RELEASE);
@@ -557,7 +557,7 @@ void on_library_loaded(const char *name, void *handle) {
                             __builtin___clear_cache(reinterpret_cast<char*>(patch.page),
                                     reinterpret_cast<char*>(patch.page + pgsz));
                         }
-                        *old = const_cast<void *>(previous_original);
+                        *old = previous_original;
                     } else {
                         LOGE("CRITICAL: unable to fully roll back PLT hook %s", show_name);
                         *old = common_original;
