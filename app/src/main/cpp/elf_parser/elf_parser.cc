@@ -266,9 +266,8 @@ namespace elf_parser {
 
     bool Elf::ValidateGnuHash(uint32_t *buckets, size_t bucket_count,
                               uint32_t *chains, size_t chain_words) {
-        if (!buckets || !chains || bucket_count == 0 || chain_words == 0 ||
-            chain_words > UINT32_MAX ||
-            gnu_symndx_ > UINT32_MAX - chain_words) return false;
+        if (!buckets || bucket_count == 0 || chain_words > UINT32_MAX ||
+            (chain_words != 0 && !chains)) return false;
         size_t max_symbol = gnu_symndx_;
         size_t total_work = 0;
         for (size_t i = 0; i < bucket_count; ++i) {
@@ -290,8 +289,12 @@ namespace elf_parser {
             if (symbol_end > UINT32_MAX) return false;
             max_symbol = std::max(max_symbol, static_cast<size_t>(symbol_end));
         }
+        const size_t used_chain_words = max_symbol - gnu_symndx_;
+        if (used_chain_words > chain_words) return false;
         dynsym_count_ = std::max(dynsym_count_, max_symbol);
-        gnu_chain_count_ = chain_words;
+        // The chain table ends at the highest terminating bucket chain. Do
+        // not retain the rest of the containing PT_LOAD range as hash data.
+        gnu_chain_count_ = used_chain_words;
         return true;
     }
 
@@ -518,7 +521,7 @@ namespace elf_parser {
             const size_t previous_symbol_count = dynsym_count_;
             if (!ValidateGnuHash(gnu_bucket_, gnu_nbucket_, gnu_chain_,
                                  gnu_chain_count_) ||
-                (previous_symbol_count != 0 && dynsym_count_ > previous_symbol_count)) {
+                (previous_symbol_count != 0 && dynsym_count_ != previous_symbol_count)) {
                 LOGE("invalid or out-of-range DT_GNU_HASH chain");
                 return false;
             }
@@ -699,6 +702,9 @@ namespace elf_parser {
                     break;
             }
         }
+        if (gnu_nbucket_ != 0 && dynsym_ &&
+            dynsym_count_ != static_cast<size_t>(gnu_symndx_) + gnu_chain_count_)
+            return false;
         if (dynsym_ && (dynsym_count_ == 0 ||
             dynsym_count_ > SIZE_MAX / sizeof(ElfW(Sym)) ||
             !rangeWithin(parse_size_,
