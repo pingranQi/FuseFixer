@@ -44,6 +44,7 @@ namespace elf_parser {
         uintptr_t *gnu_bloom_filter_{};
         uint32_t *gnu_bucket_{};
         uint32_t *gnu_chain_{};
+        size_t gnu_chain_count_{0};
 
         // for plt
         bool is_use_rela_ = false;
