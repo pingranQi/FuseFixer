@@ -204,11 +204,12 @@ bool my_is_package_owned_path(const std::string& path, const std::string& fuse_p
     if (has_default_ignorable_code_point(path)) [[unlikely]] {
         std::string new_path{path};
         remove_default_ignorable_code_point(new_path);
+        if (!old_is_package_owned_path) return false;
         auto r = old_is_package_owned_path(new_path, fuse_path);
         LOGD("fix is_package_owned_path: %s res=%d", escape_string(path).c_str(), r);
         return r;
     }
-    return old_is_package_owned_path(path, fuse_path);
+    return old_is_package_owned_path ? old_is_package_owned_path(path, fuse_path) : false;
 }
 
 bool (*old_is_app_accessible_path)(struct fuse* fuse, const std::string& path, uid_t uid);
@@ -216,11 +217,12 @@ bool my_is_app_accessible_path(struct fuse* fuse, const std::string& path, uid_t
     if (has_default_ignorable_code_point(path)) [[unlikely]] {
         std::string new_path{path};
         remove_default_ignorable_code_point(new_path);
+        if (!old_is_app_accessible_path) return false;
         auto r = old_is_app_accessible_path(fuse, new_path, uid);
         LOGD("fix is_app_accessible_path: %s uid=%d res=%d", escape_string(path).c_str(), uid, r);
         return r;
     }
-    return old_is_app_accessible_path(fuse, path, uid);
+    return old_is_app_accessible_path ? old_is_app_accessible_path(fuse, path, uid) : false;
 }
 
 // Magic is here?
@@ -231,10 +233,11 @@ bool my_is_bpf_backing_path(const std::string& path) {
     if (has_default_ignorable_code_point(path)) [[unlikely]] {
         std::string new_path{path};
         remove_default_ignorable_code_point(new_path);
+        if (!old_is_bpf_backing_path) return false;
         res = old_is_bpf_backing_path(new_path);
         LOGD("fix is_bpf_backing_path: %s res=%d", escape_string(path).c_str(), res);
     } else {
-        res = old_is_bpf_backing_path(path);
+        res = old_is_bpf_backing_path ? old_is_bpf_backing_path(path) : false;
     }
     return res;
 }
@@ -259,6 +262,7 @@ int (*old_fuse_lowlevel_notify_inval_entry)(void *se, uint64_t parent,
                                      const char *name, size_t namelen);
 int my_fuse_lowlevel_notify_inval_entry(void *se, uint64_t parent,
                                      const char *name, size_t namelen) {
+    if (!old_fuse_lowlevel_notify_inval_entry) return -1;
     auto ret = old_fuse_lowlevel_notify_inval_entry(se, parent, name, namelen);
     LOGI("notify_inval_entry: ino=0x%lx name=%s ret=%d", (unsigned long) parent, name, ret);
     return ret;
@@ -268,6 +272,7 @@ int (*old_fuse_lowlevel_notify_inval_inode)(void *se, uint64_t ino,
                                      off_t off, off_t len);
 int my_fuse_lowlevel_notify_inval_inode(void *se, uint64_t ino,
                                      off_t off, off_t len) {
+    if (!old_fuse_lowlevel_notify_inval_inode) return -1;
     auto ret = old_fuse_lowlevel_notify_inval_inode(se, ino, off, len);
     std::string* name;
     if (ino == 1) {
@@ -299,11 +304,12 @@ std::string inodePath(uint64_t ino) {
 void (*old_pf_lookup)(fuse_req_t req, uint64_t parent, const char* name);
 void my_pf_lookup(fuse_req_t req, uint64_t parent, const char* name) {
     LOGI("lookup: req=%lu parent=%s name=%s", (unsigned long) req->unique, escape_string(inodePath(parent)).c_str(), escape_string(name).c_str());
-    old_pf_lookup(req, parent, name);
+    if (old_pf_lookup) old_pf_lookup(req, parent, name);
 }
 
 int (*old_fuse_reply_entry)(fuse_req_t req, const struct fuse_entry_param* e);
 int my_fuse_reply_entry(fuse_req_t req, const struct fuse_entry_param* e) {
+    if (!old_fuse_reply_entry) return -1;
     auto ret = old_fuse_reply_entry(req, e);
     LOGI("fuse_reply_entry: req=%lu ino=%s timeout=%.2le attr_timeout=%.2le bpf_fd=%lu bpf_action=%lu backing_action=%lu backing_fd=%lu ret=%d", (unsigned long) req->unique,
          escape_string(inodePath(e->ino)).c_str(), e->entry_timeout, e->attr_timeout, (unsigned long) e->bpf_fd, (unsigned long) e->bpf_action, (unsigned long) e->backing_action, (unsigned long) e->backing_fd, ret);
@@ -317,7 +323,7 @@ int my_fuse_reply_err(fuse_req_t req, int err) {
     if (in_pf_lookup_postfilter) {
         LOGI("pf_lookup_postfilter fuse_reply_err req=%p %d", req, err);
     }
-    return old_fuse_reply_err(req, err);
+    return old_fuse_reply_err ? old_fuse_reply_err(req, err) : -1;
 }
 
 int (*old_fuse_reply_buf)(fuse_req_t req, const char *buf, size_t size);
@@ -325,7 +331,7 @@ int my_fuse_reply_buf(fuse_req_t req, const char *buf, size_t size) {
     if (in_pf_lookup_postfilter) {
         LOGI("pf_lookup_postfilter fuse_reply_buf req=%p", req);
     }
-    return old_fuse_reply_buf(req, buf, size);
+    return old_fuse_reply_buf ? old_fuse_reply_buf(req, buf, size) : -1;
 }
 
 
@@ -338,7 +344,7 @@ static void my_pf_lookup_postfilter(fuse_req_t req, fuse_ino_t parent, uint32_t 
                                  struct fuse_entry_bpf_out* febo) {
     LOGI("pf_lookup_postfilter req=%p parent=%s name=%s", req, escape_string(inodePath(parent)).c_str(), name);
     in_pf_lookup_postfilter = true;
-    old_pf_lookup_postfilter(req, parent, error_in, name, feo, febo);
+    if (old_pf_lookup_postfilter) old_pf_lookup_postfilter(req, parent, error_in, name, feo, febo);
     in_pf_lookup_postfilter = false;
 }
 
@@ -385,6 +391,17 @@ void on_library_loaded(const char *name, void *handle) {
 
         uintptr_t exec_addr = 0, exec_sz = 0;
         int exec_perm = 0;
+        struct ExecProtectionRestore {
+            void* address = nullptr;
+            size_t size = 0;
+            int protection = 0;
+            bool active = false;
+            ~ExecProtectionRestore() {
+                if (active && mprotect(address, size, protection) != 0) {
+                    PLOGE("restore executable memory protection");
+                }
+            }
+        } exec_protection_restore;
 
         maps_scan::MapInfo::ForEach([&](const maps_scan::MapInfo& info) -> bool {
             if (info.start == base_addr) {
@@ -411,7 +428,12 @@ void on_library_loaded(const char *name, void *handle) {
         // make executable area rwx to prevent their vma from splitting
         // this fixes unwind
         if (exec_addr) {
-            if (mprotect((void *) exec_addr, exec_sz, exec_perm | PROT_WRITE)) {
+            if (mprotect((void*) exec_addr, exec_sz, exec_perm | PROT_WRITE) == 0) {
+                exec_protection_restore.address = (void*) exec_addr;
+                exec_protection_restore.size = exec_sz;
+                exec_protection_restore.protection = exec_perm;
+                exec_protection_restore.active = true;
+            } else {
                 PLOGE("fix memory perm");
             }
         }
@@ -474,12 +496,6 @@ void on_library_loaded(const char *name, void *handle) {
             }
         }
 
-        if (exec_addr) {
-            if (mprotect((void *) exec_addr, exec_sz, exec_perm)) {
-                PLOGE("fix memory perm back");
-            }
-        }
-
         {
             elf_parser::Elf elf{};
             if (!elf.InitFromMemory((void*) base_addr, true)) {
@@ -502,15 +518,31 @@ void on_library_loaded(const char *name, void *handle) {
                     LOGE("no %s found", show_name);
                 }
                 for (auto a: addrs) {
-                    LOGD("hooking %s %p", show_name, (void*)a);
-                    if (mprotect(PAGE_START(a), pgsz, PROT_READ | PROT_WRITE) < 0) {
-                        PLOGE("mprotect");
-                    } else {
-                        LOGD("hooked %s %p", show_name, (void*) a);
-                        *old = *(void**) a;
-                        *(void**)a = hook;
-                        __builtin___clear_cache(PAGE_START(a), PAGE_END(a));
+                    LOGD("hooking %s %p", show_name, (void*) a);
+                    int original_protection = -1;
+                    maps_scan::MapInfo::ForEach([&](const maps_scan::MapInfo& info) -> bool {
+                        if (info.start <= a && a < info.end) {
+                            original_protection = info.perms;
+                            return false;
+                        }
+                        return true;
+                    });
+                    if (original_protection < 0) {
+                        LOGE("skip %s: cannot determine original page protection", show_name);
+                        continue;
                     }
+                    void* page = PAGE_START(a);
+                    if (mprotect(page, pgsz, PROT_READ | PROT_WRITE) < 0) {
+                        PLOGE("mprotect %s", show_name);
+                        continue;
+                    }
+                    *old = *(void**) a;
+                    *(void**) a = hook;
+                    __builtin___clear_cache(PAGE_START(a), PAGE_END(a));
+                    if (mprotect(page, pgsz, original_protection) < 0) {
+                        PLOGE("restore PLT page protection for %s", show_name);
+                    }
+                    LOGD("hooked %s %p", show_name, (void*) a);
                 }
             };
 
@@ -540,6 +572,11 @@ void on_library_loaded(const char *name, void *handle) {
 extern "C" [[gnu::visibility("default")]] [[gnu::used]]
 NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     LOGI("Loaded");
+    if (!entries || !entries->hook_func) {
+        LOGE("native_init: missing hook API");
+        hook_func = nullptr;
+        return nullptr;
+    }
     hook_func = entries->hook_func;
     return on_library_loaded;
 }
