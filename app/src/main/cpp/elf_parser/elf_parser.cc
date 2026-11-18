@@ -389,9 +389,14 @@ namespace elf_parser {
                     rel_plt_size_ = entry.d_un.d_val;
                     break;
                 case DT_REL:
+                    if (!pointerFromVaddr(entry.d_un.d_ptr,
+                                          reinterpret_cast<uintptr_t *>(&rel_dyn_))) return false;
+                    rel_dyn_is_rela_ = false;
+                    break;
                 case DT_RELA:
                     if (!pointerFromVaddr(entry.d_un.d_ptr,
                                           reinterpret_cast<uintptr_t *>(&rel_dyn_))) return false;
+                    rel_dyn_is_rela_ = true;
                     break;
                 case DT_RELSZ:
                 case DT_RELASZ:
@@ -861,27 +866,27 @@ namespace elf_parser {
                 auto r_offset = rel->r_offset;
                 auto r_sym = ELF_R_SYM(r_info);
                 auto r_type = ELF_R_TYPE(r_info);
-                if (r_sym != idx) continue;
+                if (r_sym != idx || r_sym >= dynsym_count_) continue;
                 if (is_plt && r_type != ELF_R_GENERIC_JUMP_SLOT) continue;
                 if (!is_plt && r_type != ELF_R_GENERIC_ABS && r_type != ELF_R_GENERIC_GLOB_DAT) {
                     continue;
                 }
                 auto addr = bias + r_offset;
                 if (addr > bias) res.emplace_back(addr);
-                if (is_plt) break;
             }
         };
 
-        for (const auto &[rel, rel_size, is_plt] :
-                {std::make_tuple(rel_plt_, rel_plt_size_, true),
-                 std::make_tuple(rel_dyn_, rel_dyn_size_, false),
-                 std::make_tuple(rel_android_, rel_android_size_, false)}) {
-            if (!rel) continue;
-            if (is_use_rela_) {
-                looper.template operator()<ElfW(Rela)>(rel, rel_size, is_plt);
-            } else {
-                looper.template operator()<ElfW(Rel)>(rel, rel_size, is_plt);
-            }
+        if (rel_plt_ && rel_plt_size_) {
+            if (is_use_rela_)
+                looper.template operator()<ElfW(Rela)>(rel_plt_, rel_plt_size_, true);
+            else
+                looper.template operator()<ElfW(Rel)>(rel_plt_, rel_plt_size_, true);
+        }
+        if (rel_dyn_ && rel_dyn_size_) {
+            if (rel_dyn_is_rela_)
+                looper.template operator()<ElfW(Rela)>(rel_dyn_, rel_dyn_size_, false);
+            else
+                looper.template operator()<ElfW(Rel)>(rel_dyn_, rel_dyn_size_, false);
         }
 
         return res;
