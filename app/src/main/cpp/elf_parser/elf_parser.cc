@@ -352,32 +352,76 @@ namespace elf_parser {
     }
 
     bool Elf::LoadSymbolsForFull() {
+        if (header_->e_shnum == 0 ||
+            header_->e_shstrndx == SHN_UNDEF ||
+            header_->e_shstrndx >= header_->e_shnum ||
+            header_->e_shentsize != sizeof(ElfW(Shdr))) {
+            LOGE("invalid ELF section string table metadata");
+            return false;
+        }
+
         auto *section_header = offsetOf<ElfW(Shdr) *>(header_, header_->e_shoff);
+        const auto &section_names_header = section_header[header_->e_shstrndx];
+        if (section_names_header.sh_type != SHT_STRTAB ||
+            (parse_size_ != 0 &&
+             !rangeWithin(parse_size_, section_names_header.sh_offset,
+                          section_names_header.sh_size))) {
+            LOGE("invalid ELF section name string table");
+            return false;
+        }
+        const char *section_str =
+                offsetOf<const char *>(header_, section_names_header.sh_offset);
 
-        auto shoff = reinterpret_cast<uintptr_t>(section_header);
-        char *section_str =
-                offsetOf<char *>(header_, section_header[header_->e_shstrndx].sh_offset);
+        for (uint16_t i = 0; i < header_->e_shnum; ++i) {
+            const auto *section = &section_header[i];
+            if (section->sh_type != SHT_NOBITS && parse_size_ != 0 &&
+                !rangeWithin(parse_size_, section->sh_offset, section->sh_size)) {
+                LOGE("ELF section %u exceeds input bounds", i);
+                return false;
+            }
+            if (section->sh_name >= section_names_header.sh_size) {
+                LOGE("invalid ELF section name offset");
+                return false;
+            }
+            const char *name = section_str + section->sh_name;
+            const size_t name_remaining =
+                    section_names_header.sh_size - section->sh_name;
+            const auto *name_end = static_cast<const char *>(
+                    memchr(name, '\\0', name_remaining));
+            if (!name_end) {
+                LOGE("unterminated ELF section name");
+                return false;
+            }
+            const std::string_view sname{name,
+                    static_cast<size_t>(name_end - name)};
+            const auto entsize = section->sh_entsize;
 
-        for (int i = 0; i < header_->e_shnum; i++, shoff += header_->e_shentsize) {
-            auto *section = reinterpret_cast<ElfW(Shdr) *>(shoff);
-            char *sname = section->sh_name + section_str;
-            auto entsize = section->sh_entsize;
             switch (section->sh_type) {
                 case SHT_DYNSYM: {
+                    if (entsize != sizeof(ElfW(Sym)) ||
+                        section->sh_size % entsize != 0) {
+                        LOGE("invalid ELF dynamic symbol table");
+                        return false;
+                    }
                     dynsym_ = offsetOf<decltype(dynsym_)>(header_, section->sh_offset);
                     break;
                 }
                 case SHT_SYMTAB: {
-                    if (strcmp(sname, ".symtab") == 0) {
+                    if (sname == ".symtab"sv) {
+                        if (entsize != sizeof(ElfW(Sym)) ||
+                            section->sh_size % entsize != 0) {
+                            LOGE("invalid ELF symbol table");
+                            return false;
+                        }
                         symtab_count_ = section->sh_size / entsize;
                         symtab_ = offsetOf<decltype(symtab_)>(header_, section->sh_offset);
                     }
                     break;
                 }
                 case SHT_STRTAB: {
-                    if (strcmp(sname, ".dynstr") == 0) {
+                    if (sname == ".dynstr"sv) {
                         dynstr_ = offsetOf<decltype(dynstr_)>(header_, section->sh_offset);
-                    } else if (strcmp(sname, ".strtab") == 0) {
+                    } else if (sname == ".strtab"sv) {
                         symstr_ = section->sh_offset;
                     }
                     break;
@@ -385,42 +429,76 @@ namespace elf_parser {
                 case SHT_PROGBITS: {
                     if (sname == ".gnu_debugdata"sv) {
                         auto gnu_debugdata = unxz(
-                                offsetOf<uint8_t *>(header_, section->sh_offset), section->sh_size);
-                        auto elf = std::make_unique<Elf>();
-                        if (elf->InitFromData(std::move(gnu_debugdata)) && elf->LoadSymbols()) {
-                            elf->SetLoadBase(GetLoadBase());
-                            elf->vaddr_min_ = vaddr_min_;
-                            gnu_debugdata_elf_ = std::move(elf);
-                        } else {
-                            LOGE("failed to initialize gnu_debugdata");
+                                offsetOf<const uint8_t *>(header_, section->sh_offset),
+                                section->sh_size);
+                        if (!gnu_debugdata.empty()) {
+                            auto elf = std::make_unique<Elf>();
+                            if (elf->InitFromData(std::move(gnu_debugdata)) &&
+                                elf->LoadSymbols()) {
+                                elf->SetLoadBase(GetLoadBase());
+                                elf->vaddr_min_ = vaddr_min_;
+                                gnu_debugdata_elf_ = std::move(elf);
+                            } else {
+                                LOGE("failed to initialize gnu_debugdata");
+                            }
                         }
+                        break;
                     }
                     break;
                 }
                 case SHT_HASH: {
-                    auto *d_un = offsetOf<ElfW(Word)>(header_, section->sh_offset);
+                    if (section->sh_size < 2 * sizeof(ElfW(Word))) {
+                        LOGE("invalid ELF hash section");
+                        return false;
+                    }
+                    auto *d_un = offsetOf<ElfW(Word) *>(header_, section->sh_offset);
                     nbucket_ = d_un[0];
+                    if (static_cast<uint64_t>(nbucket_ + 2) * sizeof(ElfW(Word)) >
+                        section->sh_size) {
+                        LOGE("truncated ELF hash section");
+                        return false;
+                    }
                     bucket_ = d_un + 2;
                     chain_ = bucket_ + nbucket_;
                     break;
                 }
                 case SHT_GNU_HASH: {
-                    auto *d_buf = reinterpret_cast<ElfW(Word) *>(((uintptr_t) header_) +
-                                                                 section->sh_offset);
+                    if (section->sh_size < 4 * sizeof(ElfW(Word))) {
+                        LOGE("invalid GNU hash section");
+                        return false;
+                    }
+                    auto *d_buf = offsetOf<ElfW(Word) *>(header_, section->sh_offset);
                     gnu_nbucket_ = d_buf[0];
                     gnu_symndx_ = d_buf[1];
                     gnu_bloom_size_ = d_buf[2];
                     gnu_shift2_ = d_buf[3];
+                    if (gnu_bloom_size_ == 0 || gnu_nbucket_ == 0) {
+                        LOGE("empty GNU hash table");
+                        return false;
+                    }
+                    const uint64_t bloom_bytes =
+                            static_cast<uint64_t>(gnu_bloom_size_) * sizeof(ElfW(Addr));
+                    const uint64_t bucket_bytes =
+                            static_cast<uint64_t>(gnu_nbucket_) * sizeof(uint32_t);
+                    if (4 * sizeof(ElfW(Word)) + bloom_bytes + bucket_bytes >
+                        section->sh_size) {
+                        LOGE("truncated GNU hash section");
+                        return false;
+                    }
                     gnu_bloom_filter_ =
                             reinterpret_cast<decltype(gnu_bloom_filter_)>(d_buf + 4);
-                    gnu_bucket_ = reinterpret_cast<decltype(gnu_bucket_)>(gnu_bloom_filter_ +
-                                                                          gnu_bloom_size_);
+                    gnu_bucket_ = reinterpret_cast<decltype(gnu_bucket_)>(
+                            gnu_bloom_filter_ + gnu_bloom_size_);
+                    if (gnu_nbucket_ < gnu_symndx_) {
+                        LOGE("invalid GNU hash symbol index");
+                        return false;
+                    }
                     gnu_chain_ = gnu_bucket_ + gnu_nbucket_ - gnu_symndx_;
                     break;
                 }
             }
         }
-        
+
         return true;
     }
 
