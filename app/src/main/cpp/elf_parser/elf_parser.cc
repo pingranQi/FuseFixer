@@ -299,7 +299,7 @@ namespace elf_parser {
             LOGE("invalid ELF program header table");
             return false;
         }
-        if (header->e_shnum != 0 &&
+        if (!for_dynamic_ && header->e_shnum != 0 &&
             (header->e_shentsize != sizeof(ElfW(Shdr)) ||
              (size != 0 && !rangeWithin(size, header->e_shoff,
                  static_cast<uint64_t>(header->e_shnum) * sizeof(ElfW(Shdr)))))) {
@@ -828,10 +828,10 @@ namespace elf_parser {
         return false;
     }
 
-    bool Elf::InitFromMemory(void *addr, bool init_sym) {
+    bool Elf::InitFromMemory(void *addr, bool init_sym, size_t size) {
         auto a = reinterpret_cast<uintptr_t>(addr);
         for_dynamic_ = true;
-        if (Elf::Init(a, a, 0)) {
+        if (Elf::Init(a, a, size)) {
             return !init_sym || LoadSymbols();
         }
         for_dynamic_ = false;
