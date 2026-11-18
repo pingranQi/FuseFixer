@@ -210,3 +210,9 @@ namespace elf_parser {
         }
     };
 } // namespace elf_parser
+
+#ifdef FUSEFIXER_ENABLE_TEST_API
+namespace elf_parser::testing {
+    std::vector<uint8_t> DecompressXz(const uint8_t *data, size_t size);
+}
+#endif
