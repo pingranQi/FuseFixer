@@ -220,63 +220,108 @@ namespace {
 } // namespace
 
 namespace elf_parser {
-    bool Elf::Init(uintptr_t load_base, uintptr_t parse_base, size_t size) {
-        if (parse_base == 0) {
-            LOGE("parse base 0");
-            return false;
+    bool Elf::ContainsRuntimeRange(uintptr_t address, size_t size) const {
+        if (size == 0 || address > UINTPTR_MAX - size) return false;
+        for (const auto &[start, length] : load_ranges_) {
+            if (address >= start && address - start <= length &&
+                size <= length - (address - start)) return true;
         }
+        return false;
+    }
 
-        if (size != 0 && size < sizeof(*header_)) {
-            LOGE("wrong size");
+    size_t Elf::RuntimeRemaining(uintptr_t address) const {
+        for (const auto &[start, length] : load_ranges_) {
+            if (address >= start && address - start < length) {
+                return length - static_cast<size_t>(address - start);
+            }
+        }
+        return 0;
+    }
+
+    bool Elf::ValidateGnuHash(uint32_t *buckets, size_t bucket_count,
+                              uint32_t *chains, size_t chain_words) {
+        if (!buckets || !chains || bucket_count == 0 || chain_words == 0 ||
+            gnu_symndx_ > UINT32_MAX - chain_words) return false;
+        size_t max_symbol = gnu_symndx_;
+        for (size_t i = 0; i < bucket_count; ++i) {
+            const uint32_t first = buckets[i];
+            if (first == 0) continue;
+            if (first < gnu_symndx_) return false;
+            size_t chain_index = static_cast<size_t>(first - gnu_symndx_);
+            if (chain_index >= chain_words) return false;
+            size_t steps = 0;
+            while (chain_index < chain_words) {
+                const uint32_t value = chains[chain_index];
+                ++steps;
+                if (value & 1U) break;
+                ++chain_index;
+            }
+            if (chain_index >= chain_words) return false;
+            const uint64_t symbol_end = static_cast<uint64_t>(first) + steps;
+            if (symbol_end > UINT32_MAX) return false;
+            max_symbol = std::max(max_symbol, static_cast<size_t>(symbol_end));
+        }
+        dynsym_count_ = std::max(dynsym_count_, max_symbol);
+        gnu_chain_count_ = chain_words;
+        return true;
+    }
+
+    bool Elf::Init(uintptr_t load_base, uintptr_t parse_base, size_t size) {
+        if (parse_base == 0 || (size != 0 && size < sizeof(ElfW(Ehdr)))) {
+            LOGE("invalid ELF input");
             return false;
         }
 
         load_base_ = load_base;
         parse_base_ = parse_base;
         parse_size_ = size;
-
-        auto header = reinterpret_cast<decltype(header_)>(parse_base);
-
+        auto header = reinterpret_cast<ElfW(Ehdr) *>(parse_base);
         if (!VerifyElfHeader(header) || header->e_ehsize != sizeof(ElfW(Ehdr))) {
-            LOGE("verify elf header");
+            LOGE("verify ELF header failed");
             return false;
         }
-        if (size != 0) {
-            if (header->e_phnum != 0 &&
-                (header->e_phentsize != sizeof(ElfW(Phdr)) ||
-                 !rangeWithin(size, header->e_phoff,
-                              static_cast<uint64_t>(header->e_phnum) * sizeof(ElfW(Phdr))))) {
-                LOGE("invalid ELF program header table");
-                return false;
-            }
-            if (header->e_shnum != 0 &&
-                (header->e_shentsize != sizeof(ElfW(Shdr)) ||
-                 !rangeWithin(size, header->e_shoff,
-                              static_cast<uint64_t>(header->e_shnum) * sizeof(ElfW(Shdr))))) {
-                LOGE("invalid ELF section header table");
-                return false;
-            }
+        if (header->e_phnum != 0 &&
+            (header->e_phentsize != sizeof(ElfW(Phdr)) ||
+             (size != 0 && !rangeWithin(size, header->e_phoff,
+                 static_cast<uint64_t>(header->e_phnum) * sizeof(ElfW(Phdr)))))) {
+            LOGE("invalid ELF program header table");
+            return false;
+        }
+        if (header->e_shnum != 0 &&
+            (header->e_shentsize != sizeof(ElfW(Shdr)) ||
+             (size != 0 && !rangeWithin(size, header->e_shoff,
+                 static_cast<uint64_t>(header->e_shnum) * sizeof(ElfW(Shdr)))))) {
+            LOGE("invalid ELF section header table");
+            return false;
         }
         header_ = header;
 
-        // gnu debugdata maybe has no phdr
-        if (header->e_phoff && header->e_phnum) {
-            auto phdr = reinterpret_cast<ElfW(Phdr) *>(GetParseBase() + header->e_phoff);
-            for (auto i = 0; i < header_->e_phnum; i++) {
-                auto &hdr = phdr[i];
-                if (hdr.p_type == PT_LOAD) {
-                    if (vaddr_min_ > hdr.p_vaddr) vaddr_min_ = hdr.p_vaddr;
-                } else if (hdr.p_type == PT_DYNAMIC) {
-                    dynamic_off_ = hdr.p_vaddr;
-                    dynamic_size_ = hdr.p_memsz;
+        if (header->e_phnum != 0) {
+            auto *phdr = reinterpret_cast<ElfW(Phdr) *>(parse_base + header->e_phoff);
+            for (uint16_t i = 0; i < header->e_phnum; ++i) {
+                const auto &entry = phdr[i];
+                if (entry.p_type == PT_LOAD) {
+                    vaddr_min_ = std::min(vaddr_min_, static_cast<uintptr_t>(entry.p_vaddr));
+                    if (load_base_ != 0 && load_base_ >= vaddr_min_ &&
+                        entry.p_memsz <= UINTPTR_MAX - (load_base_ - vaddr_min_) -
+                                         entry.p_vaddr) {
+                        const uintptr_t start = load_base_ - vaddr_min_ + entry.p_vaddr;
+                        if (entry.p_memsz <= SIZE_MAX)
+                            load_ranges_.emplace_back(start, static_cast<size_t>(entry.p_memsz));
+                    }
+                } else if (entry.p_type == PT_DYNAMIC) {
+                    dynamic_off_ = entry.p_vaddr;
+                    dynamic_size_ = static_cast<size_t>(entry.p_memsz);
                 }
             }
         }
-
+        if (load_base_ != 0 && vaddr_min_ != UINTPTR_MAX && load_base_ < vaddr_min_) {
+            LOGE("invalid ELF load base");
+            return false;
+        }
         valid_ = true;
         return true;
     }
-    
     bool Elf::LoadSymbols() {
         if (!valid_) return false;
         if (for_dynamic_) return LoadSymbolsForDynamic();
