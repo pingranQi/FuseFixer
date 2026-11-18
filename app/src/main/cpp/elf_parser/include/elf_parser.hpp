@@ -19,6 +19,7 @@ namespace elf_parser {
         uintptr_t parse_base_{0};
         uintptr_t vaddr_min_{UINTPTR_MAX};
         size_t parse_size_{0};
+        bool owns_mapping_{false};
         std::vector<std::pair<uintptr_t, size_t>> load_ranges_;
         ElfW(Ehdr) *header_ = nullptr;
         ElfW(Addr) dynamic_off_{0};
