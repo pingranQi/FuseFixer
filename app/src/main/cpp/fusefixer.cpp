@@ -2,6 +2,7 @@
 #include <string_view>
 #include <algorithm>
 #include <cstdint>
+#include <cerrno>
 
 #include <unicode/utf8.h>
 
@@ -267,7 +268,11 @@ int my_fuse_lowlevel_notify_inval_entry(void *se, uint64_t parent,
                                      const char *name, size_t namelen) {
     if (!old_fuse_lowlevel_notify_inval_entry) return -1;
     auto ret = old_fuse_lowlevel_notify_inval_entry(se, parent, name, namelen);
-    LOGI("notify_inval_entry: ino=0x%lx name=%s ret=%d", (unsigned long) parent, name, ret);
+    const auto safe_name = name
+            ? escape_string(std::string_view{name, namelen})
+            : std::string{"<null>"};
+    LOGI("notify_inval_entry: ino=0x%lx name=%s ret=%d",
+         (unsigned long) parent, safe_name.c_str(), ret);
     return ret;
 }
 
@@ -309,6 +314,7 @@ void my_pf_lookup(fuse_req_t req, uint64_t parent, const char* name) {
 int (*old_fuse_reply_entry)(fuse_req_t req, const struct fuse_entry_param* e);
 int my_fuse_reply_entry(fuse_req_t req, const struct fuse_entry_param* e) {
     if (!old_fuse_reply_entry) return -1;
+    if (!req || !e) return -EINVAL;
     auto ret = old_fuse_reply_entry(req, e);
     LOGI("fuse_reply_entry: req=%lu ino=%s timeout=%.2le attr_timeout=%.2le bpf_fd=%lu bpf_action=%lu backing_action=%lu backing_fd=%lu ret=%d", (unsigned long) req->unique,
          escape_string(inodePath(e->ino)).c_str(), e->entry_timeout, e->attr_timeout, (unsigned long) e->bpf_fd, (unsigned long) e->bpf_action, (unsigned long) e->backing_action, (unsigned long) e->backing_fd, ret);
@@ -341,10 +347,13 @@ static void (*old_pf_lookup_postfilter)(fuse_req_t req, fuse_ino_t parent, uint3
 static void my_pf_lookup_postfilter(fuse_req_t req, fuse_ino_t parent, uint32_t error_in,
                                  const char* name, struct fuse_entry_out* feo,
                                  struct fuse_entry_bpf_out* febo) {
-    LOGI("pf_lookup_postfilter req=%p parent=%s name=%s", req, escape_string(inodePath(parent)).c_str(), name);
+    LOGI("pf_lookup_postfilter req=%p parent=%s name=%s", req,
+         escape_string(inodePath(parent)).c_str(),
+         escape_string(name ? std::string_view{name} : std::string_view{"<null>"}).c_str());
+    const bool was_in_postfilter = in_pf_lookup_postfilter;
     in_pf_lookup_postfilter = true;
     if (old_pf_lookup_postfilter) old_pf_lookup_postfilter(req, parent, error_in, name, feo, febo);
-    in_pf_lookup_postfilter = false;
+    in_pf_lookup_postfilter = was_in_postfilter;
 }
 
 #ifdef NDEBUG
@@ -580,30 +589,24 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     return on_library_loaded;
 }
 
-extern "C"
-JNIEXPORT jint JNICALL
-Java_io_github_a13e300_fusefixer_Utils_rmdir(JNIEnv *env, jclass clazz, jstring path) {
-    jint ret;
-    auto s = env->GetStringUTFChars(path, nullptr);
-    if (rmdir(s)) {
-        ret = errno;
-    } else {
-        ret = 0;
-    }
-    env->ReleaseStringUTFChars(path, s);
-    return ret;
+static jint removePath(JNIEnv* env, jstring path, int (*remove_fn)(const char*)) {
+    if (!path) return EINVAL;
+    const char* utf8_path = env->GetStringUTFChars(path, nullptr);
+    if (!utf8_path) return ENOMEM;
+    const int result = remove_fn(utf8_path);
+    const int error = result == 0 ? 0 : errno;
+    env->ReleaseStringUTFChars(path, utf8_path);
+    return error;
 }
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_io_github_a13e300_fusefixer_Utils_unlink(JNIEnv *env, jclass clazz, jstring path) {
-    jint ret;
-    auto s = env->GetStringUTFChars(path, nullptr);
-    if (unlink(s)) {
-        ret = errno;
-    } else {
-        ret = 0;
-    }
-    env->ReleaseStringUTFChars(path, s);
-    return ret;
+Java_io_github_a13e300_fusefixer_Utils_rmdir(JNIEnv *env, jclass, jstring path) {
+    return removePath(env, path, rmdir);
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_io_github_a13e300_fusefixer_Utils_unlink(JNIEnv *env, jclass, jstring path) {
+    return removePath(env, path, unlink);
 }
