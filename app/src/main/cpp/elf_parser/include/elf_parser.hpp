@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <utility>
 
 namespace elf_parser {
     class Elf {
@@ -18,15 +19,19 @@ namespace elf_parser {
         uintptr_t parse_base_{0};
         uintptr_t vaddr_min_{UINTPTR_MAX};
         size_t parse_size_{0};
+        std::vector<std::pair<uintptr_t, size_t>> load_ranges_;
         ElfW(Ehdr) *header_ = nullptr;
         ElfW(Addr) dynamic_off_{0};
         size_t dynamic_size_{0};
 
         const char *dynstr_ = nullptr;
+        size_t dynstr_size_{0};
         ElfW(Sym) *dynsym_ = nullptr;
+        size_t dynsym_count_{0};
         ElfW(Sym) *symtab_ = nullptr;
         ElfW(Off) symtab_count_ = 0;
         ElfW(Off) symstr_ = 0;
+        size_t symstr_size_{0};
 
         uint32_t nbucket_{};
         uint32_t *bucket_ = nullptr;
@@ -111,6 +116,11 @@ namespace elf_parser {
         bool LoadSymbolsForDynamic();
 
         bool LoadSymbolsForFull();
+
+        bool ContainsRuntimeRange(uintptr_t address, size_t size) const;
+        size_t RuntimeRemaining(uintptr_t address) const;
+        bool ValidateGnuHash(uint32_t *buckets, size_t bucket_count,
+                             uint32_t *chains, size_t chain_words);
 
     public:
         Elf() = default;
