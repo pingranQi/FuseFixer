@@ -241,8 +241,10 @@ namespace elf_parser {
     bool Elf::ValidateGnuHash(uint32_t *buckets, size_t bucket_count,
                               uint32_t *chains, size_t chain_words) {
         if (!buckets || !chains || bucket_count == 0 || chain_words == 0 ||
+            chain_words > UINT32_MAX ||
             gnu_symndx_ > UINT32_MAX - chain_words) return false;
         size_t max_symbol = gnu_symndx_;
+        size_t total_work = 0;
         for (size_t i = 0; i < bucket_count; ++i) {
             const uint32_t first = buckets[i];
             if (first == 0) continue;
@@ -251,6 +253,7 @@ namespace elf_parser {
             if (chain_index >= chain_words) return false;
             size_t steps = 0;
             while (chain_index < chain_words) {
+                if (++total_work > chain_words) return false;
                 const uint32_t value = chains[chain_index];
                 ++steps;
                 if (value & 1U) break;
@@ -380,6 +383,7 @@ namespace elf_parser {
                     if (entry.d_un.d_val != DT_REL && entry.d_un.d_val != DT_RELA)
                         return false;
                     is_use_rela_ = entry.d_un.d_val == DT_RELA;
+                    has_plt_reloc_format_ = true;
                     break;
                 case DT_JMPREL:
                     if (!pointerFromVaddr(entry.d_un.d_ptr,
@@ -483,16 +487,19 @@ namespace elf_parser {
             return false;
         }
 
-        if (rel_plt_ != 0) {
+        if (rel_plt_ != 0 || rel_plt_size_ != 0) {
             const size_t entry_size = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
-            if (rel_plt_size_ == 0 || rel_plt_size_ % entry_size != 0 ||
+            if (!has_plt_reloc_format_ || rel_plt_ == 0 || rel_plt_size_ == 0 ||
+                rel_plt_size_ % entry_size != 0 ||
                 !ContainsRuntimeRange(rel_plt_, rel_plt_size_)) {
                 LOGE("invalid DT_JMPREL range");
                 return false;
             }
         }
-        if (rel_dyn_ != 0 && (rel_dyn_size_ == 0 ||
-            !ContainsRuntimeRange(rel_dyn_, rel_dyn_size_))) {
+        if ((rel_dyn_ != 0 || rel_dyn_size_ != 0) &&
+            (rel_dyn_ == 0 || rel_dyn_size_ == 0 ||
+             rel_dyn_size_ % (rel_dyn_is_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel))) != 0 ||
+             !ContainsRuntimeRange(rel_dyn_, rel_dyn_size_))) {
             LOGE("invalid dynamic relocation range");
             return false;
         }
