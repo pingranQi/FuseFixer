@@ -271,6 +271,8 @@ int my_fuse_lowlevel_notify_inval_entry(void *se, uint64_t parent,
     return ret;
 }
 
+std::string inodePath(uint64_t ino);
+
 int (*old_fuse_lowlevel_notify_inval_inode)(void *se, uint64_t ino,
                                      off_t off, off_t len);
 int my_fuse_lowlevel_notify_inval_inode(void *se, uint64_t ino,
