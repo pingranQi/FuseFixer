@@ -141,7 +141,18 @@ namespace {
         uint8_t buf[8192];
         xz_crc32_init();
         xz_crc64_init();
-        struct xz_dec *dec = xz_dec_init(XZ_DYNALLOC, 1 << 26);
+        struct xz_dec* dec = xz_dec_init(XZ_DYNALLOC, 1 << 26);
+        if (!dec) {
+            LOGE("unxz: decoder initialization failed");
+            return out;
+        }
+        struct XzDecoderGuard {
+            struct xz_dec* decoder;
+            ~XzDecoderGuard() {
+                if (decoder) xz_dec_end(decoder);
+            }
+        } decoder_guard{dec};
+
         struct xz_buf b = {.in = data,
                 .in_pos = 0,
                 .in_size = size,
@@ -158,7 +169,17 @@ namespace {
             }
             out.insert(out.end(), buf, buf + b.out_pos);
             b.out_pos = 0;
-        } while (b.in_pos != size);
+            if (ret == XZ_STREAM_END) break;
+            if (b.in_pos == size && b.out_pos == 0 && ret == XZ_OK) {
+                LOGE("unxz: incomplete stream");
+                out.clear();
+                return out;
+            }
+        } while (b.in_pos < size);
+        if (ret != XZ_STREAM_END) {
+            LOGE("unxz: stream did not terminate cleanly");
+            out.clear();
+        }
         return out;
     }
 } // namespace
