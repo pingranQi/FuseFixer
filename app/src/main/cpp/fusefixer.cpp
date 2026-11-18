@@ -1,6 +1,9 @@
 #include <string>
 #include <string_view>
 #include <algorithm>
+#include <atomic>
+#include <map>
+#include <vector>
 #include <cstdint>
 #include <cerrno>
 
@@ -540,41 +543,172 @@ void on_library_loaded(const char *name, void *handle) {
 #define PAGE_START(x) ((char*) ((x) & ~mask))
 #define PAGE_END(x) PAGE_START(x + mask)
 
-            auto do_hook_plt = [&](const char* show_name, const char* sym, void* hook, void** old, const char* alt = nullptr) {
+            auto do_hook_plt = [&](const char* show_name, const char* sym,
+                                   void* hook, void** old, const char* alt = nullptr) -> bool {
                 auto addrs = elf.FindPltAddr(sym);
-                if (addrs.empty() && alt) {
-                    addrs = elf.FindPltAddr(alt);
-                }
+                if (addrs.empty() && alt) addrs = elf.FindPltAddr(alt);
                 if (addrs.empty()) {
-                    LOGE("no %s found", show_name);
+                    LOGW("no PLT relocations found for %s", show_name);
+                    return false;
                 }
-                for (auto a: addrs) {
-                    LOGD("hooking %s %p", show_name, (void*) a);
-                    int original_protection = -1;
+                if (!old || !hook || pgsz <= 0 ||
+                    (static_cast<size_t>(pgsz) & (static_cast<size_t>(pgsz) - 1)) != 0) {
+                    LOGE("invalid PLT hook parameters for %s", show_name);
+                    return false;
+                }
+
+                struct Patch {
+                    uintptr_t slot;
+                    void *original;
+                    uintptr_t page;
+                    int protection;
+                };
+                std::vector<Patch> patches;
+                std::map<uintptr_t, int> pages;
+                void *common_original = nullptr;
+                bool saw_already_hooked = false;
+
+                // Preflight every relocation before changing any page or slot.
+                for (const uintptr_t slot : addrs) {
+                    if (slot % alignof(void*) != 0 ||
+                        slot > UINTPTR_MAX - sizeof(void*)) {
+                        LOGE("unaligned/overflowing PLT slot for %s: %p",
+                             show_name, reinterpret_cast<void*>(slot));
+                        return false;
+                    }
+                    int protection = -1;
                     maps_scan::MapInfo::ForEach([&](const maps_scan::MapInfo& info) -> bool {
-                        if (info.start <= a && a < info.end) {
-                            original_protection = info.perms;
+                        if (info.start <= slot &&
+                            slot + sizeof(void*) <= info.end) {
+                            protection = info.perms;
                             return false;
                         }
                         return true;
                     });
-                    if (original_protection < 0) {
-                        LOGE("skip %s: cannot determine original page protection", show_name);
+                    if (protection < 0 || (protection & PROT_READ) == 0) {
+                        LOGE("cannot safely read PLT slot for %s at %p",
+                             show_name, reinterpret_cast<void*>(slot));
+                        return false;
+                    }
+
+                    auto &slot_ref = *reinterpret_cast<void **>(slot);
+                    void *current = std::atomic_ref<void*>(slot_ref).load(
+                            std::memory_order_acquire);
+                    if (current == hook) {
+                        saw_already_hooked = true;
                         continue;
                     }
-                    void* page = PAGE_START(a);
-                    if (mprotect(page, pgsz, PROT_READ | PROT_WRITE) < 0) {
-                        PLOGE("mprotect %s", show_name);
-                        continue;
+                    if (!current) {
+                        LOGE("null original PLT target for %s at %p",
+                             show_name, reinterpret_cast<void*>(slot));
+                        return false;
                     }
-                    *old = *(void**) a;
-                    *(void**) a = hook;
-                    __builtin___clear_cache(PAGE_START(a), PAGE_END(a));
-                    if (mprotect(page, pgsz, original_protection) < 0) {
-                        PLOGE("restore PLT page protection for %s", show_name);
+                    if (common_original && common_original != current) {
+                        LOGE("PLT slots for %s resolve to different originals; refusing partial hook",
+                             show_name);
+                        return false;
                     }
-                    LOGD("hooked %s %p", show_name, (void*) a);
+                    common_original = current;
+                    const uintptr_t page = slot &
+                            ~(static_cast<uintptr_t>(pgsz) - 1);
+                    patches.push_back({slot, current, page, protection});
+                    auto [it, inserted] = pages.emplace(page, protection);
+                    if (!inserted && it->second != protection) {
+                        LOGE("inconsistent page protections for %s", show_name);
+                        return false;
+                    }
                 }
+
+                if (patches.empty()) {
+                    if (saw_already_hooked && *old) return true;
+                    LOGW("no unpatched PLT slots remain for %s", show_name);
+                    return false;
+                }
+                if (saw_already_hooked && *old && *old != common_original) {
+                    LOGE("existing PLT hook target changed for %s", show_name);
+                    return false;
+                }
+
+                std::vector<uintptr_t> writable_pages;
+                for (const auto &[page, protection] : pages) {
+                    if (mprotect(reinterpret_cast<void*>(page), pgsz,
+                                 protection | PROT_WRITE) != 0) {
+                        PLOGE("make PLT page writable for %s", show_name);
+                        for (auto it = writable_pages.rbegin();
+                             it != writable_pages.rend(); ++it) {
+                            const int original_protection = pages[*it];
+                            if (mprotect(reinterpret_cast<void*>(*it), pgsz,
+                                         original_protection) != 0)
+                                PLOGE("rollback PLT page protection for %s", show_name);
+                        }
+                        return false;
+                    }
+                    writable_pages.push_back(page);
+                }
+
+                // Detect a concurrent loader/relocator update before writing.
+                for (const auto &patch : patches) {
+                    auto &slot_ref = *reinterpret_cast<void **>(patch.slot);
+                    if (std::atomic_ref<void*>(slot_ref).load(std::memory_order_acquire)
+                        != patch.original) {
+                        LOGE("PLT slot changed during preflight for %s", show_name);
+                        for (auto it = writable_pages.rbegin();
+                             it != writable_pages.rend(); ++it) {
+                            if (mprotect(reinterpret_cast<void*>(*it), pgsz,
+                                         pages[*it]) != 0)
+                                PLOGE("restore PLT page after preflight race");
+                        }
+                        return false;
+                    }
+                }
+
+                for (const auto &patch : patches) {
+                    auto &slot_ref = *reinterpret_cast<void **>(patch.slot);
+                    std::atomic_ref<void*>(slot_ref).store(hook, std::memory_order_release);
+                    __builtin___clear_cache(reinterpret_cast<char*>(patch.page),
+                            reinterpret_cast<char*>(patch.page + pgsz));
+                }
+
+                bool protections_restored = true;
+                for (auto it = writable_pages.rbegin(); it != writable_pages.rend(); ++it) {
+                    if (mprotect(reinterpret_cast<void*>(*it), pgsz, pages[*it]) != 0) {
+                        PLOGE("restore PLT page protection for %s", show_name);
+                        protections_restored = false;
+                    }
+                }
+                if (!protections_restored) {
+                    // Best-effort transactional rollback: reopen every page,
+                    // restore every original pointer, then restore protections.
+                    bool rollback_writable = true;
+                    for (const auto &[page, protection] : pages) {
+                        if (mprotect(reinterpret_cast<void*>(page), pgsz,
+                                     protection | PROT_WRITE) != 0) {
+                            PLOGE("reopen PLT page for rollback (%s)", show_name);
+                            rollback_writable = false;
+                        }
+                    }
+                    if (rollback_writable) {
+                        for (const auto &patch : patches) {
+                            auto &slot_ref = *reinterpret_cast<void **>(patch.slot);
+                            std::atomic_ref<void*>(slot_ref).store(
+                                    patch.original, std::memory_order_release);
+                            __builtin___clear_cache(reinterpret_cast<char*>(patch.page),
+                                    reinterpret_cast<char*>(patch.page + pgsz));
+                        }
+                    } else {
+                        LOGE("CRITICAL: unable to fully roll back PLT hook %s", show_name);
+                    }
+                    for (const auto &[page, protection] : pages) {
+                        if (mprotect(reinterpret_cast<void*>(page), pgsz, protection) != 0)
+                            PLOGE("restore PLT protection after rollback (%s)", show_name);
+                    }
+                    return false;
+                }
+
+                *old = common_original;
+                LOGI("installed PLT hook %s in %zu slot(s)",
+                     show_name, patches.size());
+                return true;
             };
 
             do_hook_plt("strcasecmp", "strcasecmp", (void*) my_strcasecmp, (void**) &old_strcasecmp);
