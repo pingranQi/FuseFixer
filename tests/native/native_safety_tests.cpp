@@ -125,17 +125,6 @@ int findLibcRange(dl_phdr_info *info, size_t, void *opaque) {
     return 1;
 }
 
-uint32_t testSysvHash(std::string_view name) {
-    uint32_t hash = 0;
-    for (unsigned char ch : name) {
-        hash = (hash << 4) + ch;
-        const uint32_t high = hash & 0xF0000000U;
-        hash ^= high;
-        hash ^= high >> 24;
-    }
-    return hash;
-}
-
 void testElfFiles(const char *self) {
     elf_parser::Elf good;
     assert(good.InitFromFile(self, 0, true));
