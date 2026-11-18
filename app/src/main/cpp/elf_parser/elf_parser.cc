@@ -100,15 +100,16 @@ namespace {
     }
 
     std::tuple<uintptr_t, size_t> OpenLibrary(const std::string_view path, size_t file_off) {
-        int fd = open(path.data(), O_RDONLY | O_CLOEXEC);
+        const std::string path_string{path};
+        int fd = open(path_string.c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
-            PLOGE("elf_parser: open %s", path.data());
+            PLOGE("elf_parser: open %s", path_string.c_str());
             return {0, 0};
         }
 
         struct stat st{};
         if (fstat(fd, &st) < 0) {
-            PLOGE("elf_parser: stat %s", path.data());
+            PLOGE("elf_parser: stat %s", path_string.c_str());
             close(fd);
             return {0, 0};
         }
@@ -133,7 +134,7 @@ namespace {
         void* mapped = mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, file_off);
         close(fd);
         if (mapped == MAP_FAILED) {
-            PLOGE("elf_parser: mmap %s", path.data());
+            PLOGE("elf_parser: mmap %s", path_string.c_str());
             return {0, 0};
         }
         return {reinterpret_cast<uintptr_t>(mapped), sz};
@@ -338,7 +339,9 @@ namespace elf_parser {
                     gnu_symndx_ = raw[1];
                     gnu_bloom_size_ = raw[2];
                     gnu_shift2_ = raw[3];
-                    if (gnu_shift2_ >= sizeof(uint32_t) * 8) return false;
+                    if (gnu_shift2_ >= sizeof(uint32_t) * 8 ||
+                        gnu_nbucket_ == 0 || gnu_bloom_size_ == 0 ||
+                        gnu_nbucket_ < gnu_symndx_) return false;
                     gnu_bloom_filter_ = reinterpret_cast<decltype(gnu_bloom_filter_)>(raw + 4);
                     gnu_bucket_ = reinterpret_cast<decltype(bucket_)>(gnu_bloom_filter_ + gnu_bloom_size_);
                     gnu_chain_ = gnu_bucket_ + gnu_nbucket_ - gnu_symndx_;
