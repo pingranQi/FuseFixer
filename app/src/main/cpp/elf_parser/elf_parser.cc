@@ -338,6 +338,7 @@ namespace elf_parser {
                     gnu_symndx_ = raw[1];
                     gnu_bloom_size_ = raw[2];
                     gnu_shift2_ = raw[3];
+                    if (gnu_shift2_ >= sizeof(uint32_t) * 8) return false;
                     gnu_bloom_filter_ = reinterpret_cast<decltype(gnu_bloom_filter_)>(raw + 4);
                     gnu_bucket_ = reinterpret_cast<decltype(bucket_)>(gnu_bloom_filter_ + gnu_bloom_size_);
                     gnu_chain_ = gnu_bucket_ + gnu_nbucket_ - gnu_symndx_;
@@ -453,7 +454,7 @@ namespace elf_parser {
                     }
                     auto *d_un = offsetOf<ElfW(Word) *>(header_, section->sh_offset);
                     nbucket_ = d_un[0];
-                    if (static_cast<uint64_t>(nbucket_ + 2) * sizeof(ElfW(Word)) >
+                    if ((static_cast<uint64_t>(nbucket_) + 2) * sizeof(ElfW(Word)) >
                         section->sh_size) {
                         LOGE("truncated ELF hash section");
                         return false;
@@ -472,7 +473,8 @@ namespace elf_parser {
                     gnu_symndx_ = d_buf[1];
                     gnu_bloom_size_ = d_buf[2];
                     gnu_shift2_ = d_buf[3];
-                    if (gnu_bloom_size_ == 0 || gnu_nbucket_ == 0) {
+                    if (gnu_bloom_size_ == 0 || gnu_nbucket_ == 0 ||
+                        gnu_shift2_ >= sizeof(uint32_t) * 8) {
                         LOGE("empty GNU hash table");
                         return false;
                     }
