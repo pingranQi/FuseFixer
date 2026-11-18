@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <link.h>
 #include <string>
 #include <vector>
@@ -67,9 +68,13 @@ void testElfFiles(const char *self) {
     const auto bytes = readFile(self);
     assert(bytes.size() > sizeof(ElfW(Ehdr)));
 
+    const auto *original_ehdr =
+            reinterpret_cast<const ElfW(Ehdr) *>(bytes.data());
+    const ElfW(Off) original_shoff = original_ehdr->e_shoff;
+    const uint16_t original_shnum = original_ehdr->e_shnum;
     auto bad_header = bytes;
-    auto *ehdr = reinterpret_cast<ElfW(Ehdr) *>(bad_header.data());
-    ehdr->e_shoff = static_cast<ElfW(Off)>(bad_header.size() - 1);
+    auto *bad_ehdr = reinterpret_cast<ElfW(Ehdr) *>(bad_header.data());
+    bad_ehdr->e_shoff = static_cast<ElfW(Off)>(bad_header.size() - 1);
     auto bad_header_path = writeTemp(bad_header, "-bad-header");
     elf_parser::Elf bad_header_elf;
     assert(!bad_header_elf.InitFromFile(bad_header_path, 0, true));
@@ -77,9 +82,9 @@ void testElfFiles(const char *self) {
 
     auto bad_section = bytes;
     auto *section_header = reinterpret_cast<ElfW(Shdr) *>(
-            bad_section.data() + ehdr->e_shoff);
+            bad_section.data() + original_shoff);
     bool changed = false;
-    for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
+    for (uint16_t i = 0; i < original_shnum; ++i) {
         if (section_header[i].sh_type == SHT_GNU_HASH) {
             section_header[i].sh_offset = bad_section.size() - 1;
             changed = true;
