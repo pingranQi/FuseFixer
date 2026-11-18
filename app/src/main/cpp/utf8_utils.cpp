@@ -107,9 +107,11 @@ void remove_default_ignorable_code_point(std::string &value) {
 
 int utf16ToStandardUtf8(const char16_t *input, size_t length, std::string *output) {
     if (!output || (!input && length != 0)) return EINVAL;
-    if (length > SIZE_MAX / 3) return ENAMETOOLONG;
     output->clear();
-    output->reserve(length * 3);
+    if (length > SIZE_MAX / 3) return ENAMETOOLONG;
+
+    std::string encoded;
+    encoded.reserve(length * 3);
     for (size_t i = 0; i < length; ++i) {
         uint32_t code_point = input[i];
         if (code_point >= 0xD800 && code_point <= 0xDBFF) {
@@ -121,24 +123,27 @@ int utf16ToStandardUtf8(const char16_t *input, size_t length, std::string *outpu
         } else if (code_point >= 0xDC00 && code_point <= 0xDFFF) {
             return EILSEQ;
         }
+        // POSIX paths are NUL-terminated byte strings; embedded U+0000
+        // would silently truncate the path at the native boundary.
         if (code_point == 0) return EINVAL;
         if (code_point <= 0x7F) {
-            output->push_back(static_cast<char>(code_point));
+            encoded.push_back(static_cast<char>(code_point));
         } else if (code_point <= 0x7FF) {
-            output->push_back(static_cast<char>(0xC0 | (code_point >> 6)));
-            output->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+            encoded.push_back(static_cast<char>(0xC0 | (code_point >> 6)));
+            encoded.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
         } else if (code_point <= 0xFFFF) {
-            output->push_back(static_cast<char>(0xE0 | (code_point >> 12)));
-            output->push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
-            output->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+            encoded.push_back(static_cast<char>(0xE0 | (code_point >> 12)));
+            encoded.push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
+            encoded.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
         } else if (code_point <= 0x10FFFF) {
-            output->push_back(static_cast<char>(0xF0 | (code_point >> 18)));
-            output->push_back(static_cast<char>(0x80 | ((code_point >> 12) & 0x3F)));
-            output->push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
-            output->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+            encoded.push_back(static_cast<char>(0xF0 | (code_point >> 18)));
+            encoded.push_back(static_cast<char>(0x80 | ((code_point >> 12) & 0x3F)));
+            encoded.push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
+            encoded.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
         } else {
             return EILSEQ;
         }
     }
+    output->swap(encoded);
     return 0;
 }
