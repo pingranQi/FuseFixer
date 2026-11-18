@@ -129,7 +129,7 @@ namespace elf_parser {
 
         bool InitFromFile(std::string_view so_path, uintptr_t base_addr = 0, bool init_sym = false, size_t file_off = 0);
 
-        bool InitFromMemory(void* addr, bool init_sym = false);
+        bool InitFromMemory(void* addr, bool init_sym = false, size_t size = 0);
 
         bool LoadSymbols();
 
