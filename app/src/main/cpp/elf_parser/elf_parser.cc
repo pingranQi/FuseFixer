@@ -449,6 +449,7 @@ namespace elf_parser {
                 LOGE("DT_HASH table exceeds mapped range");
                 return false;
             }
+            if (raw[0] == 0 || raw[1] == 0) return false;
             nbucket_ = raw[0];
             dynsym_count_ = raw[1];
             bucket_ = raw + 2;
@@ -717,7 +718,7 @@ namespace elf_parser {
         if ((mask & bloom_word) != mask) return 0;
 
         uint32_t index = gnu_bucket_[hash % gnu_nbucket_];
-        if (index < gnu_symndx_ || index >= dynsym_count_) return 0;
+        if (index == 0 || index < gnu_symndx_ || index >= dynsym_count_) return 0;
         for (size_t steps = 0; steps < gnu_chain_count_; ++steps, ++index) {
             if (index >= dynsym_count_) return 0;
             const size_t chain_index = static_cast<size_t>(index - gnu_symndx_);
@@ -873,11 +874,16 @@ namespace elf_parser {
         if (!idx) idx = ElfLookupIdx(name, ElfHash(name));
         if (!idx) idx = LinearLookupForDyn(name);
         if (!idx) return res;
-        auto bias = GetLoadBias();
+        const uintptr_t bias = load_base_ - vaddr_min_;
 
         auto looper = [&res, idx, bias, this]<typename T>(auto begin, auto size, bool is_plt) -> void {
-            const auto *rel_end = reinterpret_cast<const T *>(begin + size);
-            for (const auto *rel = reinterpret_cast<const T *>(begin); rel < rel_end; ++rel) {
+            if (size == 0 || size % sizeof(T) != 0 ||
+                begin > UINTPTR_MAX - size ||
+                !ContainsRuntimeRange(begin, size)) return;
+            const auto *rel_begin = reinterpret_cast<const T *>(begin);
+            const size_t count = size / sizeof(T);
+            for (size_t i = 0; i < count; ++i) {
+                const auto *rel = rel_begin + i;
                 auto r_info = rel->r_info;
                 auto r_offset = rel->r_offset;
                 auto r_sym = ELF_R_SYM(r_info);
@@ -887,7 +893,8 @@ namespace elf_parser {
                 if (!is_plt && r_type != ELF_R_GENERIC_ABS && r_type != ELF_R_GENERIC_GLOB_DAT) {
                     continue;
                 }
-                auto addr = bias + r_offset;
+                if (r_offset > UINTPTR_MAX - bias) continue;
+                const uintptr_t addr = bias + r_offset;
                 if (addr > bias) res.emplace_back(addr);
             }
         };
