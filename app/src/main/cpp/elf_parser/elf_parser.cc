@@ -422,6 +422,12 @@ namespace elf_parser {
                                           reinterpret_cast<uintptr_t *>(&rel_dyn_))) return false;
                     rel_dyn_is_rela_ = true;
                     break;
+                case DT_RELENT:
+                    if (entry.d_un.d_val != sizeof(ElfW(Rel))) return false;
+                    break;
+                case DT_RELAENT:
+                    if (entry.d_un.d_val != sizeof(ElfW(Rela))) return false;
+                    break;
                 case DT_RELSZ:
                 case DT_RELASZ:
                     rel_dyn_size_ = entry.d_un.d_val;
@@ -907,7 +913,10 @@ namespace elf_parser {
                 }
                 if (r_offset > UINTPTR_MAX - bias) continue;
                 const uintptr_t addr = bias + r_offset;
-                if (addr > bias) res.emplace_back(addr);
+                if (addr > bias && addr % alignof(void*) == 0 &&
+                    ContainsRuntimeRange(addr, sizeof(void*))) {
+                    res.emplace_back(addr);
+                }
             }
         };
 
