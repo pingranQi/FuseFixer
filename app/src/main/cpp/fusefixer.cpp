@@ -653,9 +653,11 @@ static jint jstringToStandardUtf8(JNIEnv *env, jstring value, std::string *outpu
         }
     } guard{env, value, chars};
 
-    return utf16ToStandardUtf8(
-            reinterpret_cast<const char16_t *>(chars),
-            static_cast<size_t>(length), output);
+    std::u16string utf16;
+    utf16.reserve(static_cast<size_t>(length));
+    for (jsize i = 0; i < length; ++i)
+        utf16.push_back(static_cast<char16_t>(chars[i]));
+    return utf16ToStandardUtf8(utf16.data(), utf16.size(), output);
 }
 
 static jint removePath(JNIEnv* env, jstring path, int (*remove_fn)(const char*)) {
