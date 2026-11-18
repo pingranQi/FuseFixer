@@ -47,6 +47,7 @@ namespace elf_parser {
 
         // for plt
         bool is_use_rela_ = false;
+        bool has_plt_reloc_format_ = false;
 
         ElfW(Addr) rel_plt_ = 0;  //.rel.plt or .rela.plt
         ElfW(Word) rel_plt_size_ = 0;
