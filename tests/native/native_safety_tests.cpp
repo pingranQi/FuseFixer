@@ -106,6 +106,26 @@ struct MappedElfRange {
     size_t size = 0;
 };
 
+int findMainExecutableRange(dl_phdr_info *info, size_t, void *opaque) {
+    if (!info->dlpi_name || info->dlpi_name[0] != '\0') return 0;
+    uintptr_t min_vaddr = UINTPTR_MAX;
+    uintptr_t max_vaddr = 0;
+    for (uint16_t i = 0; i < info->dlpi_phnum; ++i) {
+        const auto &phdr = info->dlpi_phdr[i];
+        if (phdr.p_type != PT_LOAD) continue;
+        if (phdr.p_memsz > UINTPTR_MAX - phdr.p_vaddr) return 0;
+        min_vaddr = std::min(min_vaddr, static_cast<uintptr_t>(phdr.p_vaddr));
+        max_vaddr = std::max(max_vaddr,
+                static_cast<uintptr_t>(phdr.p_vaddr + phdr.p_memsz));
+    }
+    if (min_vaddr == UINTPTR_MAX || max_vaddr <= min_vaddr ||
+        info->dlpi_addr > UINTPTR_MAX - min_vaddr) return 0;
+    auto *range = static_cast<MappedElfRange *>(opaque);
+    range->base = static_cast<uintptr_t>(info->dlpi_addr) + min_vaddr;
+    range->size = max_vaddr - min_vaddr;
+    return 1;
+}
+
 int findLibcRange(dl_phdr_info *info, size_t, void *opaque) {
     if (!info->dlpi_name || std::strstr(info->dlpi_name, "libc.so.6") == nullptr)
         return 0;
@@ -262,6 +282,24 @@ void testElfFiles(const char *self) {
         elf_parser::Elf bad_sysv_elf;
         assert(!bad_sysv_elf.InitFromFile(bad_sysv_path, 0, true));
         unlink(bad_sysv_path.c_str());
+    }
+
+    // The test executable itself is linked with both hash styles and has
+    // PLT imports. This exercises dynamic hash parsing and relocation bounds.
+    MappedElfRange main_range;
+    assert(dl_iterate_phdr(findMainExecutableRange, &main_range) == 1);
+    {
+        elf_parser::Elf main_elf;
+        assert(main_elf.InitFromMemory(
+                reinterpret_cast<void *>(main_range.base), true, main_range.size));
+        assert(main_elf.getSym("malloc") != nullptr);
+        const auto malloc_slots = main_elf.FindPltAddr("malloc");
+        assert(!malloc_slots.empty());
+        for (uintptr_t slot : malloc_slots) {
+            assert(slot >= main_range.base);
+            assert(slot <= UINTPTR_MAX - sizeof(void *));
+            assert(slot + sizeof(void *) <= main_range.base + main_range.size);
+        }
     }
 
     // Exercise the dynamic parser against a real mapped shared object.
