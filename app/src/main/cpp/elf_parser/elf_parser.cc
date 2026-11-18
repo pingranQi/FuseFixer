@@ -844,6 +844,7 @@ namespace elf_parser {
     bool Elf::InitFromFile(std::string_view so_path, uintptr_t base_addr, bool init_sym, size_t file_off) {
         auto [addr, size] = OpenLibrary(so_path, file_off);
         path = so_path;
+        owns_mapping_ = addr != 0 && size != 0;
         if (Elf::Init(base_addr, addr, size)) {
             return !init_sym || LoadSymbols();
         }
@@ -861,7 +862,7 @@ namespace elf_parser {
     }
 
     Elf::~Elf() {
-        if (parse_size_ != 0)
+        if (owns_mapping_ && parse_size_ != 0)
             munmap(reinterpret_cast<void *>(parse_base_), parse_size_);
     }
 
