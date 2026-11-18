@@ -1,31 +1,30 @@
 import com.android.build.gradle.tasks.PackageAndroidArtifact
 import java.nio.charset.StandardCharsets
-import java.io.FileInputStream
 import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
 }
 
-fun String.execute(): String =
-    Runtime.getRuntime().exec(split("\\s".toRegex()).toTypedArray())
-        .let { proc ->
-            proc.waitFor()
-            val result = proc.inputStream.use {
-                it.readBytes()
-            }.toString(StandardCharsets.UTF_8).trim()
-            proc.destroy()
-            result
-        }
+fun gitOutput(vararg args: String): String? = runCatching {
+    val process = ProcessBuilder(listOf("git") + args)
+        .directory(rootProject.projectDir)
+        .redirectErrorStream(true)
+        .start()
+    val output = process.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText().trim() }
+    if (process.waitFor() == 0) output.takeIf { it.isNotBlank() } else null
+}.getOrNull()
 
-
-val gitCommitCount = "git rev-list HEAD --count".execute().toInt()
-val gitCommitHash = "git rev-parse --verify --short HEAD".execute()
+val gitCommitCount = gitOutput("rev-list", "HEAD", "--count")
+    ?.toIntOrNull()
+    ?.coerceAtLeast(1)
+    ?: 1
+val gitCommitHash = gitOutput("rev-parse", "--verify", "--short=12", "HEAD") ?: "dev"
 
 val keystorePropertiesFile: File = rootProject.file("keystore.properties")
 val keystoreProperties = if (keystorePropertiesFile.exists() && keystorePropertiesFile.isFile) {
     Properties().apply {
-        load(FileInputStream(keystorePropertiesFile))
+        keystorePropertiesFile.inputStream().use { load(it) }
     }
 } else null
 
@@ -59,7 +58,7 @@ android {
                 abiFilters("arm64-v8a", "armeabi-v7a")
             }
         }
-        base.archivesName = "FuseFixer-${gitCommitCount}-${gitCommitHash}-${System.currentTimeMillis()}"
+        base.archivesName = "FuseFixer-${gitCommitCount}-${gitCommitHash}"
     }
 
     signingConfigs {
