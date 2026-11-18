@@ -4,7 +4,7 @@ project("fusefixer")
 
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--exclude-libs,ALL -Wl,-z,start-stop-visibility=hidden -Wl,--gc-sections")
 
-add_library(${CMAKE_PROJECT_NAME} SHARED fusefixer.cpp)
+add_library(${CMAKE_PROJECT_NAME} SHARED fusefixer.cpp utf8_utils.cpp)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
     log elf_parser maps_scan)
