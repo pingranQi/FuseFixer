@@ -158,6 +158,7 @@ namespace {
 
     std::vector<uint8_t> unxz(const uint8_t *data, size_t size) {
         std::vector<uint8_t> out;
+        if (!data || size == 0) return out;
         uint8_t buf[8192];
         xz_crc32_init();
         xz_crc64_init();
@@ -432,7 +433,11 @@ namespace elf_parser {
             !ContainsRuntimeRange(strtab_address, dynstr_size_) ||
             strtab_address % alignof(char) != 0 ||
             symtab_address % alignof(ElfW(Sym)) != 0) {
-            LOGE("incomplete or invalid dynamic symbol metadata");
+            LOGE("invalid dynamic symbols: strtab=%p symtab=%p strsz=%zu syment=%d str-range=%d",
+                 reinterpret_cast<void*>(strtab_address),
+                 reinterpret_cast<void*>(symtab_address), dynstr_size_,
+                 found_syment,
+                 strtab_address ? ContainsRuntimeRange(strtab_address, dynstr_size_) : 0);
             return false;
         }
         dynstr_ = reinterpret_cast<const char *>(strtab_address);
