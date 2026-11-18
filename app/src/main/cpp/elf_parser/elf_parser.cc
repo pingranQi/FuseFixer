@@ -53,6 +53,22 @@ namespace {
         return offset <= total && length <= static_cast<uint64_t>(total) - offset;
     }
 
+    bool validateSysvHash(const ElfW(Word) *raw, size_t available_words) {
+        if (!raw || available_words < 2) return false;
+        const size_t bucket_count = raw[0];
+        const size_t symbol_count = raw[1];
+        if (bucket_count == 0 || symbol_count == 0 ||
+            bucket_count > SIZE_MAX - 2 ||
+            symbol_count > SIZE_MAX - 2 - bucket_count) return false;
+        const size_t required_words = 2 + bucket_count + symbol_count;
+        if (required_words > available_words) return false;
+        for (size_t i = 0; i < bucket_count + symbol_count; ++i) {
+            const uint32_t index = raw[2 + i];
+            if (index >= symbol_count && index != STN_UNDEF) return false;
+        }
+        return true;
+    }
+
     bool VerifyElfHeader(ElfW(Ehdr) *header) {
         if (0 != memcmp(header->e_ident, ELFMAG, SELFMAG))
             return false;
@@ -462,11 +478,12 @@ namespace elf_parser {
             const uint64_t words = 2ULL + raw[0] + raw[1];
             if (words > SIZE_MAX / sizeof(ElfW(Word)) ||
                 !ContainsRuntimeRange(hash_address,
-                                      static_cast<size_t>(words * sizeof(ElfW(Word))))) {
-                LOGE("DT_HASH table exceeds mapped range");
+                                      static_cast<size_t>(words * sizeof(ElfW(Word)))) ||
+                !validateSysvHash(raw, static_cast<size_t>(
+                        words > SIZE_MAX ? 0 : words))) {
+                LOGE("invalid or out-of-range DT_HASH table");
                 return false;
             }
-            if (raw[0] == 0 || raw[1] == 0) return false;
             nbucket_ = raw[0];
             dynsym_count_ = raw[1];
             bucket_ = raw + 2;
@@ -632,8 +649,9 @@ namespace elf_parser {
                     auto *raw = offsetOf<ElfW(Word) *>(header_, section->sh_offset);
                     const uint64_t words = 2ULL + raw[0] + raw[1];
                     if (words > SIZE_MAX / sizeof(ElfW(Word)) ||
-                        words * sizeof(ElfW(Word)) > section->sh_size) {
-                        LOGE("truncated ELF SysV hash table");
+                        words * sizeof(ElfW(Word)) > section->sh_size ||
+                        !validateSysvHash(raw, static_cast<size_t>(words))) {
+                        LOGE("invalid or truncated ELF SysV hash table");
                         return false;
                     }
                     nbucket_ = raw[0];
