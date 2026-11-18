@@ -150,10 +150,16 @@ void testElfFiles(const char *self) {
     MappedElfRange libc_range;
     assert(dl_iterate_phdr(findLibcRange, &libc_range) == 1);
     assert(libc_range.base != 0 && libc_range.size != 0);
-    elf_parser::Elf dynamic_elf;
-    assert(dynamic_elf.InitFromMemory(
-            reinterpret_cast<void *>(libc_range.base), true, libc_range.size));
-    assert(dynamic_elf.getSym("malloc") != nullptr);
+    {
+        elf_parser::Elf dynamic_elf;
+        assert(dynamic_elf.InitFromMemory(
+                reinterpret_cast<void *>(libc_range.base), true, libc_range.size));
+        assert(dynamic_elf.getSym("malloc") != nullptr);
+    }
+    // The parser must not unmap a loader-owned image when it is destroyed.
+    void *allocation_after_parse = std::malloc(32);
+    assert(allocation_after_parse != nullptr);
+    std::free(allocation_after_parse);
     dlclose(handle);
 
     // Deterministic malformed-input smoke fuzzing: arbitrary short files must
