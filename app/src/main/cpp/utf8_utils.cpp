@@ -106,8 +106,9 @@ void remove_default_ignorable_code_point(std::string &value) {
 }
 
 int utf16ToStandardUtf8(const char16_t *input, size_t length, std::string *output) {
-    if (!output || (!input && length != 0)) return EINVAL;
+    if (!output) return EINVAL;
     output->clear();
+    if (!input && length != 0) return EINVAL;
     if (length > SIZE_MAX / 3) return ENAMETOOLONG;
 
     std::string encoded;
