@@ -478,6 +478,11 @@ void on_library_loaded(const char *name, void *handle) {
                     }
                 }
 
+                if (saw_already_hooked && !*old) {
+                    LOGE("PLT slot for %s is already hooked but its original target is unknown",
+                         show_name);
+                    return false;
+                }
                 if (patches.empty()) {
                     if (saw_already_hooked && *old) return true;
                     LOGW("no unpatched PLT slots remain for %s", show_name);
