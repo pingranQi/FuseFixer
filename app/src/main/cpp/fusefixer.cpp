@@ -168,6 +168,9 @@ void remove_default_ignorable_code_point(std::string& str) {
         U8_NEXT(s, i, len, ch);
         if (ch < 0) {
             LOGW("invalid char at %zu-%zu : %s", prev, i, escape_string(str).c_str());
+            while (prev < i) {
+                buf[j++] = static_cast<char>(s[prev++]);
+            }
         } else if (!is_default_ignorable_code_point(ch)) {
             while (prev < i) {
                 buf[j++] = (char) s[prev++];
@@ -274,14 +277,8 @@ int my_fuse_lowlevel_notify_inval_inode(void *se, uint64_t ino,
                                      off_t off, off_t len) {
     if (!old_fuse_lowlevel_notify_inval_inode) return -1;
     auto ret = old_fuse_lowlevel_notify_inval_inode(se, ino, off, len);
-    std::string* name;
-    if (ino == 1) {
-        static std::string ROOT_NAME = "(ROOT)";
-        name = &ROOT_NAME;
-    } else {
-        name = reinterpret_cast<std::string*>(ino);
-    }
-    LOGI("notify_inval_inode: ino=0x%lx name=%s ret=%d", (unsigned long) ino, escape_string(*name).c_str(), ret);
+    LOGI("notify_inval_inode: ino=0x%lx name=%s ret=%d",
+         (unsigned long) ino, escape_string(inodePath(ino)).c_str(), ret);
     return ret;
 }
 
