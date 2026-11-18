@@ -433,11 +433,17 @@ namespace elf_parser {
             !ContainsRuntimeRange(strtab_address, dynstr_size_) ||
             strtab_address % alignof(char) != 0 ||
             symtab_address % alignof(ElfW(Sym)) != 0) {
-            LOGE("invalid dynamic symbols: strtab=%p symtab=%p strsz=%zu syment=%d str-range=%d",
+            LOGE("invalid dynamic symbols: base=%p vmin=%p strtab=%p symtab=%p strsz=%zu syment=%d str-range=%d ranges=%zu",
+                 reinterpret_cast<void*>(load_base_),
+                 reinterpret_cast<void*>(vaddr_min_),
                  reinterpret_cast<void*>(strtab_address),
                  reinterpret_cast<void*>(symtab_address), dynstr_size_,
                  found_syment,
-                 strtab_address ? ContainsRuntimeRange(strtab_address, dynstr_size_) : 0);
+                 strtab_address ? ContainsRuntimeRange(strtab_address, dynstr_size_) : 0,
+                 load_ranges_.size());
+            for (const auto &[range_start, range_size] : load_ranges_)
+                LOGE("PT_LOAD range: %p + %zu",
+                     reinterpret_cast<void*>(range_start), range_size);
             return false;
         }
         dynstr_ = reinterpret_cast<const char *>(strtab_address);
