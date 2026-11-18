@@ -44,20 +44,20 @@ void testUtf8() {
 }
 
 void testXz() {
-    static constexpr uint8_t valid[] = {
-        0xfd,0x37,0x7a,0x58,0x5a,0x00,0x00,0x04,0xe6,0xd6,0xb4,0x46,
-        0x02,0x00,0x21,0x01,0x16,0x00,0x00,0x00,0x74,0x2f,0xe5,0xa3,
-        0x01,0x00,0x20,0x46,0x75,0x73,0x65,0x46,0x69,0x78,0x65,0x72,
-        0x20,0x6e,0x61,0x74,0x69,0x76,0x65,0x20,0x58,0x5a,0x20,0x74,
-        0x65,0x73,0x74,0x20,0x70,0x61,0x79,0x6c,0x6f,0x61,0x64,0x0a,
-        0x00,0x00,0x00,0x00,0xf8,0x5e,0x45,0xf9,0xfe,0x42,0x16,0x4f,
-        0x00,0x01,0x39,0x21,0xcf,0x28,0x6b,0x62,0x1f,0xb6,0xf3,0x7d,
-        0x01,0x00,0x00,0x00,0x00,0x04,0x59,0x5a
-    };
-    const auto decoded = elf_parser::testing::DecompressXz(valid, sizeof(valid));
+    static constexpr char valid_hex[] =
+        "fd377a585a000004e6d6b4460200210116000000742fe5a301002046757365"
+        "4669786572206e617469766520585a2074657374207061796c6f61640a00"
+        "000000f85e45f9fe42164f00013921cf286b621fb6f37d010000000004595a";
+    std::vector<uint8_t> valid;
+    for (size_t i = 0; i + 1 < sizeof(valid_hex); i += 2) {
+        const auto byte = static_cast<uint8_t>(
+                std::strtoul(std::string(valid_hex + i, 2).c_str(), nullptr, 16));
+        valid.push_back(byte);
+    }
+    const auto decoded = elf_parser::testing::DecompressXz(valid.data(), valid.size());
     const std::string expected = "FuseFixer native XZ test payload\n";
     assert(std::string(decoded.begin(), decoded.end()) == expected);
-    assert(elf_parser::testing::DecompressXz(valid, sizeof(valid) - 8).empty());
+    assert(elf_parser::testing::DecompressXz(valid.data(), valid.size() - 8).empty());
     const uint8_t garbage[] = {0, 1, 2, 3, 4, 5};
     assert(elf_parser::testing::DecompressXz(garbage, sizeof(garbage)).empty());
     assert(elf_parser::testing::DecompressXz(nullptr, 0).empty());
