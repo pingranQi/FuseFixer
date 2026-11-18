@@ -1,5 +1,7 @@
 #include <string>
 #include <string_view>
+#include <algorithm>
+#include <cstdint>
 
 #include <unicode/utf8.h>
 
@@ -98,86 +100,42 @@ inline bool is_default_ignorable_code_point(UChar32 ch) {
 void remove_default_ignorable_code_point(std::string& str);
 
 int svcasecmp_fix(std::string_view sv1, std::string_view sv2) {
-    const char *cm = charmap;
-    auto s1 = sv1.data(), s2 = sv2.data();
-    auto l1 = sv1.size(), l2 = sv2.size();
-    size_t i1 = 0, i2 = 0, j1 = 0, j2 = 0;
-
-    UChar32 ch;
-    while (i1 < l1 && i2 < l2) {
-        if (i1 == j1) {
-            do {
-                i1 = j1;
-                if (j1 == l1) break;
-                U8_NEXT(s1, j1, l1, ch);
-                // We can't do any thing if we occurred invalid utf-8 char.
-                // In this case, j will increment by 1, so just break
-                if (ch < 0) [[unlikely]] {
-                    LOGW("invalid char at %zu-%zu : %s", i1, j1, escape_string(sv1).c_str());
-                    break;
-                }
-            } while (is_default_ignorable_code_point(ch));
-        }
-
-        if (i2 == j2) {
-            do {
-                i2 = j2;
-                if (j2 == l2) break;
-                U8_NEXT(s2, j2, l2, ch);
-                if (ch < 0) [[unlikely]] {
-                    LOGW("invalid char at %zu-%zu : %s", i2, j2, escape_string(sv2).c_str());
-                    break;
-                }
-            } while (is_default_ignorable_code_point(ch));
-        }
-
-        if (cm[s1[i1]] != cm[s2[i2]]) {
-            break;
-        }
-        ++i1;
-        ++i2;
-    }
-    if (i1 < l1 && i1 == j1) {
-        do {
-            i1 = j1;
-            if (j1 == l1) break;
-            U8_NEXT(s1, j1, l1, ch);
-            // We can't do any thing if we occurred invalid utf-8 char.
-            // In this case, j will increment by 1, so just break
+    // Normalize only Unicode default-ignorable code points. Preserve malformed
+    // UTF-8 bytes verbatim so comparisons remain bounded and deterministic.
+    const auto normalize = [](std::string_view input) {
+        std::string output;
+        output.reserve(input.size());
+        const auto* bytes = reinterpret_cast<const uint8_t*>(input.data());
+        int32_t index = 0;
+        const auto length = static_cast<int32_t>(input.size());
+        while (index < length) {
+            const int32_t start = index;
+            UChar32 ch = 0;
+            U8_NEXT(bytes, index, length, ch);
             if (ch < 0) [[unlikely]] {
-                LOGW("invalid char at %zu-%zu : %s", i1, j1, escape_string(sv1).c_str());
-                break;
+                LOGW("invalid UTF-8 at %d-%d", start, index);
+                output.append(input.data() + start, static_cast<size_t>(index - start));
+            } else if (!is_default_ignorable_code_point(ch)) {
+                output.append(input.data() + start, static_cast<size_t>(index - start));
             }
-        } while (is_default_ignorable_code_point(ch));
-    }
+        }
+        return output;
+    };
 
-    if (i2 < l2 && i2 == j2) {
-        do {
-            i2 = j2;
-            if (j2 == l2) break;
-            U8_NEXT(s2, j2, l2, ch);
-            if (ch < 0) [[unlikely]] {
-                LOGW("invalid char at %zu-%zu : %s", i2, j2, escape_string(sv2).c_str());
-                break;
-            }
-        } while (is_default_ignorable_code_point(ch));
-    }
-
-    int ret = ((u_char) cm[s1[i1]] - (u_char) cm[s2[i2]]);
-#ifndef NDEBUG
-    {
-        std::string ss1{sv1}, ss2{sv2};
-        remove_default_ignorable_code_point(ss1);
-        remove_default_ignorable_code_point(ss2);
-        int ret2 = strcasecmp(ss1.c_str(), ss2.c_str());
-        if (ret2 != ret) {
-            LOGE("!!! strcasecmp implementation error: compare %s : %s, ret = %d, real ret=%d",
-                 escape_string(sv1).c_str(), escape_string(sv2).c_str(), ret, ret2);
-            return ret2;
+    const auto lhs = normalize(sv1);
+    const auto rhs = normalize(sv2);
+    const auto common = std::min(lhs.size(), rhs.size());
+    for (size_t i = 0; i < common; ++i) {
+        const auto left = static_cast<uint8_t>(lhs[i]);
+        const auto right = static_cast<uint8_t>(rhs[i]);
+        const auto folded_left = static_cast<uint8_t>(charmap[left]);
+        const auto folded_right = static_cast<uint8_t>(charmap[right]);
+        if (folded_left != folded_right) {
+            return static_cast<int>(folded_left) - static_cast<int>(folded_right);
         }
     }
-#endif
-    return ret;
+    if (lhs.size() == rhs.size()) return 0;
+    return lhs.size() < rhs.size() ? -1 : 1;
 }
 
 int strcasecmp_fix(const char *s1, const char *s2) {
@@ -220,6 +178,26 @@ void remove_default_ignorable_code_point(std::string& str) {
 }
 
 static HookFunType hook_func = nullptr;
+
+static bool install_inline_hook(void* target, void* replacement, void** original,
+                               const char* name) {
+    if (!target) {
+        LOGW("skip %s hook: target symbol not found", name);
+        return false;
+    }
+    if (!hook_func) {
+        LOGE("skip %s hook: hook function is unavailable", name);
+        return false;
+    }
+    const int result = hook_func(target, replacement, original);
+    if (result != 0 || !original || !*original) {
+        LOGE("hook %s failed: result=%d trampoline=%p", name, result,
+             original ? *original : nullptr);
+        return false;
+    }
+    LOGI("hook %s installed", name);
+    return true;
+}
 
 bool (*old_is_package_owned_path)(const std::string& path, const std::string& fuse_path);
 bool my_is_package_owned_path(const std::string& path, const std::string& fuse_path) {
@@ -468,46 +446,31 @@ void on_library_loaded(const char *name, void *handle) {
             if (!p) p = elf.getSymbAddress(is_app_accessible_path_alt);
             LOGD("is_app_accessible_path: %p", p);
 
-            auto r = hook_func(p, (void *) my_is_app_accessible_path,
-                               (void **) &old_is_app_accessible_path);
-            if (r != 0) {
-                LOGD("hook is_app_accessible_path failed: %d", r);
-            }
+            install_inline_hook(p, (void*) my_is_app_accessible_path,
+                                  (void**) &old_is_app_accessible_path, "is_app_accessible_path");
 
             p = elf.getSymbAddress(is_package_owned_path);
             if (!p) p = elf.getSymbAddress(is_package_owned_path_alt);
             LOGD("is_package_owned_path: %p", p);
-            r = hook_func(p, (void *) my_is_package_owned_path, (void **) &old_is_package_owned_path);
-            if (r != 0) {
-                LOGE("hook is_package_owned_path failed: %d", r);
-            }
+            install_inline_hook(p, (void*) my_is_package_owned_path,
+                                  (void**) &old_is_package_owned_path, "is_package_owned_path");
 
             p = elf.getSymbAddress(is_bpf_backing_path);
             if (!p) p = elf.getSymbAddress(is_bpf_backing_path_alt);
             LOGD("is_bpf_backing_path: %p", p);
-            r = hook_func(p, (void *) my_is_bpf_backing_path, (void **) &old_is_bpf_backing_path);
-            if (r != 0) {
-                LOGE("hook is_bpf_backing_path failed: %d", r);
-            }
+            install_inline_hook(p, (void*) my_is_bpf_backing_path,
+                                  (void**) &old_is_bpf_backing_path, "is_bpf_backing_path");
 
             if constexpr (kDebugFuse) {
                 p = elf.getSymbAddress("_ZN13mediaprovider4fuseL9pf_lookupEP8fuse_reqmPKc");
                 LOGI("pf_lookup: %p", p);
-                r = hook_func(p, (void *) my_pf_lookup, (void **) &old_pf_lookup);
-                if (r != 0) {
-                    LOGE("hook pf_lookup failed: %d", r);
-                } else {
-                    LOGI("hook pf_lookup success");
-                }
+                install_inline_hook(p, (void*) my_pf_lookup,
+                                      (void**) &old_pf_lookup, "pf_lookup");
 
                 p = elf.getSymbAddress("_ZN13mediaprovider4fuseL20pf_lookup_postfilterEP8fuse_reqmjPKcP14fuse_entry_outP18fuse_entry_bpf_out");
                 LOGI("pf_lookup_postfilter: %p", p);
-                r = hook_func(p, (void *) my_pf_lookup_postfilter, (void **) &old_pf_lookup_postfilter);
-                if (r != 0) {
-                    LOGE("hook pf_lookup_postfilter failed: %d", r);
-                } else {
-                    LOGI("hook pf_lookup_postfilter success");
-                }
+                install_inline_hook(p, (void*) my_pf_lookup_postfilter,
+                                      (void**) &old_pf_lookup_postfilter, "pf_lookup_postfilter");
             }
         }
 
