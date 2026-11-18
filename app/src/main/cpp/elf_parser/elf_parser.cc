@@ -173,6 +173,7 @@ namespace {
             }
         } decoder_guard{dec};
 
+        constexpr size_t kMaxDebugDataSize = 128U * 1024U * 1024U;
         struct xz_buf b = {.in = data,
                 .in_pos = 0,
                 .in_size = size,
@@ -187,6 +188,12 @@ namespace {
             const auto ret = xz_dec_run(dec, &b);
             const size_t produced = b.out_pos;
             if (produced != 0) {
+                if (produced > kMaxDebugDataSize - out.size()) {
+                    LOGE("unxz: expanded debug data exceeds %zu bytes",
+                         kMaxDebugDataSize);
+                    out.clear();
+                    return out;
+                }
                 out.insert(out.end(), buf, buf + produced);
             }
             b.out_pos = 0;
