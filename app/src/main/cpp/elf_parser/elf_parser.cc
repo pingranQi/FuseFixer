@@ -313,8 +313,8 @@ namespace elf_parser {
             for (uint16_t i = 0; i < header->e_phnum; ++i) {
                 const auto &entry = phdr[i];
                 if (entry.p_type == PT_LOAD)
-                    vaddr_min_ = std::min(vaddr_min_,
-                            static_cast<uintptr_t>(entry.p_vaddr));
+                    vaddr_min_ = vaddr_min_ < entry.p_vaddr
+                            ? vaddr_min_ : static_cast<uintptr_t>(entry.p_vaddr);
                 else if (entry.p_type == PT_DYNAMIC) {
                     if (entry.p_memsz > SIZE_MAX) return false;
                     dynamic_off_ = entry.p_vaddr;
@@ -875,7 +875,7 @@ namespace elf_parser {
         if (!idx) return res;
         auto bias = GetLoadBias();
 
-        auto looper = [&res, idx, bias]<typename T>(auto begin, auto size, bool is_plt) -> void {
+        auto looper = [&res, idx, bias, this]<typename T>(auto begin, auto size, bool is_plt) -> void {
             const auto *rel_end = reinterpret_cast<const T *>(begin + size);
             for (const auto *rel = reinterpret_cast<const T *>(begin); rel < rel_end; ++rel) {
                 auto r_info = rel->r_info;
